@@ -1,0 +1,8 @@
+# ESP-IDF の生成物
+build/
+managed_components/
+sdkconfig
+sdkconfig.old
+
+# 実機ログ（手元の測定記録。リポジトリには含めない）
+logs/

@@ -1,0 +1,85 @@
+# ---- sanoTTS-jp on M5Stack CoreS3 (ESP32-S3 / 16MB Flash / 8MB Quad PSRAM) ----
+#
+# 前半は CoreS3 で実機確認済みのボード設定、後半は sanoTTS-jp の要求。
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# --- ボード（CoreS3 で実機確認済み）---
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# --- PSRAM（8 MB Quad）---------------------------------------------------
+#
+# ⚠️ **Quad。** Octal にすると起動時に
+#    `octal_psram: PSRAM chip is not connected` → abort() でブートループする。
+#    ESP32-S3-WROOM-1-N16R8 が Octal なので間違えやすい。
+#
+# 使い道: saan_speaker.cpp の音声バッファ 28,672 B（spk_alloc が PSRAM 優先で取る）。
+#   arena 208 KB は速度のため内部 DRAM (.bss) のまま。重みは .rodata (flash)。
+#
+# ⚠️ **PSRAM 有効時は実行時の esp_partition_mmap が ESP_ERR_NO_MEM で落ちる**
+#    （8 MB が data 用 vaddr を占有する。CoreS3 実機で実測、1 MB でも同じ）。
+#    重みをヘッダ埋め込み（app の DROM として起動時にマップ）にしたのはこのため。
+#    **パーティション mmap 方式に戻すなら PSRAM を切ること。**
+# ⚠️ S3 の Quad PSRAM は flash と同じ SPI0 を共有する。**速度への影響は未測定。**
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# ⚠️ **CoreS3 に USB-UART ブリッジは無い。** native USB でないとログも入力も出ない。
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# --- sanoTTS-jp（../sanoTTS-jp/esp32/sdkconfig.defaults から）---
+# 公式 performance/speed.rst が -O2 を推奨している。
+# ⚠️ IDF の既定は -Og。**速度を測るならここを変えないと意味が無い。**
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# ⚠️ csrc/fft.c の saan_irfft_1024 は自動変数だけで 4,096 B 使う。
+#    合成本体は専用タスク（main.c の SAAN_TASK_STACK = 16 KB）で回すが、
+#    app_main 側も余裕を持たせる。
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+CONFIG_FREERTOS_HZ=1000
+
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# --- キャッシュ ---
+#
+# ⚠️ **ESP32-S3 では D-cache のサイズは DRAM を減らさない。**
+#    linker script (esp_system/ld/memory.ld) の dram0_0_seg は
+#    キャッシュ設定に依らず 341,760 B 固定で、D-cache は 0x3FD00000 側から
+#    高位アドレスを取る。実測: 64KB+32KB と 32KB+32KB で `.dram0.bss` の
+#    overflow が**同じ 10,096 B**だった。
+#    ⚠️ かつて「64 KB にすると 48 KB DRAM が減る」と書いたが**誤り**。
+#
+# 重みを flash から mmap して読むので D-cache がそのまま効く。
+# reports/d3_esp32_model.json は「decoder の 1 層 69 KB が D-cache に
+# 入りきらず thrash するかもしれない（**未検証**）」と書いている。
+# 69 KB は 64 KB にも入らないが、**大きくしても損はしない**ので 64 KB を採る。
+# ⚠️ **32 KB とどちらが速いかは実測していない。**
+CONFIG_ESP32S3_DATA_CACHE_64KB=y
+CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
+
+# 1 発話の合成は数秒かかる。タスク WDT に噛まれないようにする。
+CONFIG_ESP_TASK_WDT_INIT=n
+
+# --- 内部 DRAM を空ける（CoreS3 では arena 208 KB が効いて余裕が無い）----------
+#
+# ⚠️ **ESP32-S3 の D/IRAM は共有プール（341,760 B）。** IRAM に置かれたコードは
+#    そのぶん DRAM を食う。arena 208 KB + M5GFX/M5Unified を積むと
+#    **残り 18,745 B** しかなく、起動時のタスクスタック（main 8 KB + 合成 16 KB）が
+#    取れない。IRAM に置く必要のないコードを flash へ移す。
+#
+# ⚠️ **flash 書き込み中に走る ISR があると壊れる設定。** このファームは
+#    実行時に flash へ書かない（重みは mmap して**読むだけ**）ので安全。
+#    NVS や OTA を足すなら見直すこと。
+CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH=y
+CONFIG_FREERTOS_PLACE_SNAPSHOT_FUNS_INTO_FLASH=y
+CONFIG_HEAP_PLACE_FUNCTION_INTO_FLASH=y
+CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=y
+CONFIG_RINGBUF_PLACE_ISR_FUNCTIONS_INTO_FLASH=y
+CONFIG_SPI_FLASH_ROM_IMPL=y
+CONFIG_SPI_MASTER_ISR_IN_IRAM=n

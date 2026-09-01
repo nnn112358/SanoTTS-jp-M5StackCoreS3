@@ -1,0 +1,16 @@
+## M5Stack CoreS3 の内蔵アンプ (AW88298) を使うために M5Unified が要る。
+##
+## ⚠️ **M5Unified は C++。** saan_speaker.cpp から使う。
+##    sanoTTS-jp 側の main.c / saan_model.c / saan_console.c は C のままで、
+##    saan_i2s.h の API はそのまま（extern "C" で実装している）。
+##
+## ⚠️ **M5Unified は M5GFX を引き込む。** ディスプレイを使わなくてもリンクされ、
+##    内部 DRAM を食う。arena が 208 KB あるので残量に注意すること。
+##
+## バージョンは CoreS3 で実機動作を確認した組み合わせ
+## （M5Unified 0.2.21 / M5GFX 0.2.28）に合わせてある。
+dependencies:
+  idf:
+    version: ">=5.0"
+  m5stack/m5unified:
+    version: "^0.2.0"
