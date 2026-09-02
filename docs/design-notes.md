@@ -55,7 +55,7 @@ NOTICE.md  LICENSES/        帰属表示とライセンス全文
 | 事象 | 対処 |
 |---|---|
 | `.dram0.bss` が 10,096 B 溢れてリンクできない | 音声バッファ 28,672 B を static からヒープ確保（PSRAM 優先）に。IRAM のコードを flash へ（`FREERTOS/HEAP/RINGBUF_PLACE_*_INTO_FLASH`, `SPI_FLASH_ROM_IMPL`, `SPI_MASTER_ISR_IN_IRAM=n`）。`set(COMPONENTS main)` で不要なコンポーネントを外す |
-| `esp_partition_mmap` が `ESP_ERR_NO_MEM`（3 MB でも 1 MB でも） | PSRAM 8 MB が data 用 vaddr を占有する。**重みはヘッダ化して app の `.rodata` に**（起動時に DROM としてマップされるので競合しない） |
+| `esp_partition_mmap` が `ESP_ERR_NO_MEM`（3 MB でも 1 MB でも） | **真因は `CONFIG_SPI_FLASH_ROM_IMPL=y`**（IDF の mmap がコンパイルから外れ、ROM の旧実装 `0x40000bac` に差し替わる。`flash_mmap.c:53`）。当時は PSRAM の vaddr と誤診して重みをヘッダ化した（設計としては正しいので残す）。`ROM_IMPL=n` で 13.7 MB の辞書 mmap が通る |
 | S3 のキャッシュ設定と DRAM | `dram0_0_seg` は 341,760 B 固定で、D-cache を 64 KB にしても減らない（64+32 KB と 32+32 KB で overflow が同じ 10,096 B）。無料なので 64 KB |
 | M5 の 22.05 → 44.1 kHz リサンプル | `SAAN_SPK_OUT_RATE 22050`。AW88298 は 22.05 kHz 対応で、M5Unified が `rate_tbl` からレジスタ 0x06 (I2SSR) を設定する（M5Unified.cpp 566–581 行。CoreS3 の既定値も 22050） |
 | `M5.Speaker.playRaw` はデータをコピーしない | 再生が終わるまでバッファを触らない。ストリーミングは 3 枚回し（キューは 2 枚）、貯める方式は `stop()` で再生完了を待ってから解放 |
@@ -130,3 +130,31 @@ eos → stop()（再生完了を待って解放）
   （154 ms ごと）にしか渡せないので、渡した瞬間にキューが 2 枚とも埋まっていると、次の機会までに
   2 枚とも尽きる組み合わせが必ずある（残り 154〜215 ms のとき。実機で 1 発話目に毎回 1 回踏んだ）。
   閾値をいじっても穴が移動するだけなので、渡すタイミングという概念を無くした
+
+## 端末内漢字 G2P（sanoTTS-jp K-1 〜 K-7 の取り込み）
+
+漢字かな交じり文を端末だけで音素 ID にする。本家 sanoTTS-jp（origin/main、PR #1 `k1-kanji-ondevice`）
+のコードをそのまま `components/saanotts_core/`（`k1dict.c` / `k4_accent.c` / `k4b_njd.c` /
+`k7_label2ids.c` / `openjtalk/`）と `main/`（`saan_dict.c` / `saan_kanji.c`）に持ってきた。
+
+```
+文 ─▶ k1_encode_key ─▶ k1_analyze（LOUDS 辞書 + Viterbi、arena を借りる）─▶ k1_entry_feature
+   ─▶ mecab2njd ─▶ NJD 8 段（pronunciation / digit / accent_phrase / accent_type / unvoiced / long_vowel …）
+   ─▶ njd2jpcommon ─▶ フルコンテキストラベル ─▶ k7_label2ids ─▶ 生徒の音素 ID（57 トークン）─▶ 合成
+```
+
+- 辞書 `k1-dict-438750.bin`（13,702,320 B、NAIST-jdic / UniDic を TTS 用に枝刈りした派生物、
+  修正 BSD）は `dict` パーティション（0x210000〜、14.6 MB）を `esp_partition_mmap` してそのまま読む。
+  PSRAM 8 MB と同じ MMU 窓（32 MB）を使うが、実測で flash mmap の空きは 22.8 MB あった
+  （起動ログ `flash mmap の最大連続空き`。以前 model パーティションの mmap が `ESP_ERR_NO_MEM`
+  だった原因は **`CONFIG_SPI_FLASH_ROM_IMPL=y`**: IDF の `spi_flash_mmap` がコンパイルから外れて
+  ROM 内の旧実装（`esp32s3.rom.ld` の `spi_flash_mmap = 0x40000bac`、ページ表に上限）に
+  リンクされていた。`ROM_IMPL=n` に戻して解決。vaddr 不足ではなかった）
+- 作業領域は合成用の `g_arena`（208 KB）を借りる（G2P と合成は同時に走らない）。Open JTalk の
+  NJD / JPCommon は calloc を使う（本家 K-5 実測: 1 文ピーク約 105 KB）
+- 入力: `=` 前置ならかな中間表現（本家 QEMU との突き合わせ用）、それ以外は文そのもの。
+  **`-DSAAN_KANJI=0` で丸ごと外せる**（辞書リーダ・Open JTalk をビルドから外し、辞書も焼かない。
+  入力はかな中間表現だけ。CMake キャッシュに残るので切り替えたら build/ を消す）
+  本家は逆（`!` 前置で漢字）だが、このプロジェクトは「文を打てば喋る」を既定にした
+- 未知語は k1_unk_guess が 1 文字ずつ読みを推測して平板で読む（無音で消えない）
+- ⚠️ 枝刈りの代償: フル辞書と読みが変わる文が 17.79%（本家 M-74）。SCOREQ は変わらない

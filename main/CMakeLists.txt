@@ -2,19 +2,26 @@
 # コピーしたもので、音声出力だけ M5.Speaker 版（saan_speaker.cpp）に差し替えてある。
 # 本家の saan_i2s.c / saan_i2s.h（driver/i2s_std 直叩き）は**持ってこない**。
 #
-# ⚠️ **`esp_partition` は要らない。** 重みはヘッダ埋め込み (.rodata) のみ。
+# esp_partition は辞書（dict パーティション）の mmap に要る。重みはヘッダ埋め込み (.rodata)。
 #    パーティション mmap の経路は持っていない（CoreS3 では PSRAM と競合して
 #    ESP_ERR_NO_MEM になるため。partitions.csv 参照）。
 # ⚠️ **`driver`（傘）は要らない。** コンソールが使うのは usb_serial_jtag と uart だけ。
 #    傘を書くと全 esp_driver_* が IRAM を食う。
+# 端末内漢字 G2P（-DSAAN_KANJI=0 で外す。値は components/saanotts_core が決めて CACHE に置く）
+set(SAAN_MAIN_K "")
+if(SAAN_KANJI)
+    set(SAAN_MAIN_K "saan_dict.c" "saan_kanji.c")
+endif()
+
 idf_component_register(
     SRCS "main.c"
          "saan_model.c"
          "saan_console.c"
          "saan_speaker.cpp"
          "saan_ui.cpp"
+         ${SAAN_MAIN_K}
     INCLUDE_DIRS "."
-    REQUIRES saanotts_core m5stack-avatar esp_timer esp_driver_usb_serial_jtag esp_driver_uart
+    REQUIRES saanotts_core m5stack-avatar esp_timer esp_driver_usb_serial_jtag esp_driver_uart esp_mm esp_partition
 )
 
 # --- 重み blob → `const` 配列のヘッダ ---------------------------------------
@@ -81,4 +88,11 @@ if(DEFINED SAAN_BUFFERED)
     else()
         message(STATUS "sanoTTS: 再生 = ストリーミング（xRT 測定用）")
     endif()
+endif()
+
+# --- 端末内漢字 G2P（-DSAAN_KANJI=0 で外す）------------------------------------
+# ⚠️ コア component と同じ条件で main 側にも渡す。saan_kanji.c が Open JTalk のヘッダを
+#    include するので CHARSET_UTF_8 も要る。
+if(SAAN_KANJI)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE SAAN_KANJI=1 CHARSET_UTF_8)
 endif()

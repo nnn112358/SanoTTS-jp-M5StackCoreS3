@@ -82,3 +82,27 @@ set(COMPONENTS main)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(saanotts_cores3)
+
+# --- 辞書 blob を flash の `dict` パーティションに焼く ----------------------------
+#
+# 端末内漢字 G2P の辞書（sanoTTS-jp Release v0.2.0 の k1-dict-438750.bin、13,702,320 B）。
+# git には入れていない: scripts/get_dict.sh で取る。
+# ⚠️ mmap して読むので app には埋めない（app が 14 MB になる）。
+# ⚠️ -DSAAN_KANJI=0 のときは焼かない（辞書も要らない）。値は components/saanotts_core が
+#    CACHE に置くが、project() の前に評価されるここでは自分で既定を決める。
+if(NOT DEFINED SAAN_KANJI)
+    set(SAAN_KANJI 1)
+endif()
+if(SAAN_KANJI)
+if(NOT DEFINED SAAN_DICT_BLOB)
+    set(SAAN_DICT_BLOB "${CMAKE_CURRENT_LIST_DIR}/model/k1-dict-438750.bin")
+endif()
+if(NOT EXISTS "${SAAN_DICT_BLOB}")
+    message(FATAL_ERROR
+        "辞書 blob が無い: ${SAAN_DICT_BLOB}\n"
+        "  scripts/get_dict.sh で取るか -DSAAN_DICT_BLOB=<絶対パス> を渡すこと")
+endif()
+file(SIZE "${SAAN_DICT_BLOB}" SAAN_DICT_BLOB_SIZE)
+message(STATUS "sanoTTS: dict blob ${SAAN_DICT_BLOB} (${SAAN_DICT_BLOB_SIZE} B) → dict パーティション")
+esptool_py_flash_to_partition(flash "dict" "${SAAN_DICT_BLOB}")
+endif()

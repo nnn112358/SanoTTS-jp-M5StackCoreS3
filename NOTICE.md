@@ -74,3 +74,23 @@ MOE-Speech (litagin) — https://huggingface.co/spaces/litagin/moe-speech-licens
   （全文: [`components/m5stack-avatar/LICENSE.txt`](components/m5stack-avatar/LICENSE.txt)）
 - `components/m5stack-avatar/src/` にコピー。ESP-IDF（Arduino 無し）で通すための差分は
   [`components/m5stack-avatar/README.md`](components/m5stack-avatar/README.md)
+
+## 6. Open JTalk — 端末内の日本語テキスト処理（修正 BSD）
+
+- `components/saanotts_core/openjtalk/`（34 ファイル + COPYING）。sanoTTS-jp が
+  pyopenjtalk-plus 0.4.1.post9 の sdist から取り込んだもの（改変は `jpcommon_label.c` の
+  `MAXBUFLEN 1024 → 256` の 1 件。詳細は sanoTTS-jp `csrc/openjtalk/PROVENANCE.md`）。
+- Copyright (c) 2008-2016 Nagoya Institute of Technology / HTS Working Group — 修正 BSD
+  （全文: [`LICENSES/open_jtalk.COPYING.txt`](LICENSES/open_jtalk.COPYING.txt)、
+  sanoTTS-jp の帰属表示: [`LICENSES/sanoTTS-jp.NOTICE-openjtalk.txt`](LICENSES/sanoTTS-jp.NOTICE-openjtalk.txt)）
+
+## 7. 辞書 `k1-dict-438750.bin` — 端末内の形態素解析用（修正 BSD）
+
+- sanoTTS-jp Release v0.2.0 の `k1-dict-438750.bin`（13,702,320 B、
+  SHA-256 `f162c922074d76817298b34d8a8fd35f7d195f38540303485a76c956b5d84877`）。
+  `scripts/get_dict.sh` で取得する（git には入れていない）。
+- NAIST Japanese Dictionary（NAIST）と UniDic（The UniDic Consortium）を TTS 用に
+  枝刈り・形式変換した派生物。修正 BSD。帰属表示は
+  [`LICENSES/sanoTTS-jp.NOTICE-dictionary.txt`](LICENSES/sanoTTS-jp.NOTICE-dictionary.txt)
+- ⚠️ 枝刈りしてあるので、フル辞書（ホストの OpenJTalk）と読みが変わる文がある
+  （sanoTTS-jp の実測で 17.79% の文。地名・固有名詞で起きやすい）

@@ -19,3 +19,17 @@
 gh release download --repo ayutaz/sanoTTS-jp --pattern 'saanotts-jp-v3-int8.bin' -O model/student_i8.bin
 sha256sum model/student_i8.bin      # 上の値と突き合わせる
 ```
+
+## 辞書（端末内漢字 G2P 用、git には入れていない）
+
+| ファイル | 出所 | SHA-256 |
+|---|---|---|
+| `k1-dict-438750.bin` | sanoTTS-jp Release v0.2.0（13,702,320 B。NAIST-jdic / UniDic を TTS 用に枝刈りした派生物、修正 BSD） | `f162c922074d76817298b34d8a8fd35f7d195f38540303485a76c956b5d84877` |
+
+```sh
+./scripts/get_dict.sh        # Release から取って SHA-256 を検証する
+```
+
+- ビルド時に `dict` パーティション（0x210000、14.6 MB）へ焼かれ、端末は `esp_partition_mmap` で
+  そのまま読む（RAM にコピーしない）。`-DSAAN_KANJI=0` なら不要
+- `sanoTTS-jp-v0.2.0.SHA256SUMS.txt` は Release の全資産のハッシュ（照合用）

@@ -7,7 +7,8 @@ ESP-IDF プロジェクト。クラウドも辞書も不要。
 - 起動すると [m5stack-avatar](https://github.com/stack-chan/m5stack-avatar) の顔が出て、
   `今日は良い天気ですね。` を吹き出しに出しながら内蔵スピーカーで喋る（**口は音量に合わせて動く**）
 - **画面をタッチ**すると直前の文をもう一度喋る
-- USB シリアルの `かな> ` にかな中間表現（例: `きょ][おわよ][いて][んきです°ね`）を打つと、その文を喋る
+- USB シリアルの `かな> ` に**漢字かな交じり文をそのまま**打つと、その文を喋る
+  （端末内の辞書 13.7 MB + Open JTalk の NJD 鎖で読みとアクセントを付ける。クラウド不要）
 
 > **モデルと推論コアは [ayutaz/sanoTTS-jp](https://github.com/ayutaz/sanoTTS-jp) のものです。**
 > コードは MIT、**重み `model/student_i8.bin` は sanoTTS-jp Model License 1.0**
@@ -22,12 +23,14 @@ ESP-IDF プロジェクト。クラウドも辞書も不要。
 | ESP-IDF | **v5.5.5**（`~/esp/esp-idf` に置く前提。`idf.sh` 参照） |
 | Python | `uv`（ビルド時のヘッダ生成に使う。stdlib のみ） |
 | ネットワーク | 初回ビルドで M5Unified / M5GFX を Component Registry から取得 |
+| 辞書 | `scripts/get_dict.sh` で sanoTTS-jp Release の `k1-dict-438750.bin`（13.7 MB）を `model/` に置く（git には入れていない） |
 
 ## ビルドと書き込み
 
 ```sh
 git clone https://github.com/nnn112358/SanoTTS-jp-M5StackCoreS3
 cd SanoTTS-jp-M5StackCoreS3
+./scripts/get_dict.sh                       # 辞書 blob（13.7 MB）を取る
 ./idf.sh build
 ./idf.sh -p /dev/ttyACM0 flash monitor      # 終了は Ctrl+]
 ```
@@ -37,13 +40,17 @@ cd SanoTTS-jp-M5StackCoreS3
 | `-DSAAN_ENABLE_PIE=0/1` | **1** | W8A8 + ESP32-S3 の整数 SIMD (PIE)。0 = W8A32 / 移植可能 C |
 | `-DSAAN_BUFFERED=0/1` | **0** | 0 = xRT から先読み量を決めて計算しながら鳴らす / 1 = 全部貯めてから鳴らす |
 | `-DSAAN_BOOT_SPEAK=0/1` | **1** | 起動時に 1 文喋る |
+| `-DSAAN_KANJI=0/1` | **1** | 端末内漢字 G2P（辞書 13.7 MB + Open JTalk）。0 で外すと入力はかな中間表現だけ、辞書も焼かない |
 
 `-D` の値は `build/` を消すまで CMake キャッシュに残る。
 CoreS3 は native USB なので `/dev/ttyACM0`（権限が無ければ
 `SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", MODE="0666"` を udev に）。
 
 ## 現状
-実機（CoreS3 / 240 MHz）で **W8A8 + PIE は定常 1.56× RT**（合成が再生より遅い。顔の描画込み）。
+
+シリアルに文を打つと喋る。`=` で始めるとかな中間表現（`=きょ][おわよ][いて][んきです°ね`）として扱い、
+本家 QEMU の記録値と checksum を突き合わせられる。辞書は枝刈りしてあるので、ホストの OpenJTalk と
+読みが変わる文がある（sanoTTS-jp の実測で 17.79% の文。地名・固有名詞で起きやすい）。
 そこで音声の (1 − 1/xRT) + 2 チャンク ≒ 60% を先に貯めてから鳴らし始め、以後は計算しながら鳴らす
 （1.2 秒の文で発話開始まで 1.8 s、途切れ 0。xRT は毎回実測して次の発話に反映）。出力 PCM は sanoTTS-jp の QEMU 記録と 27,136 sample
 すべて bit 一致（移植は正しい）。聴取での品質確認はしていない。

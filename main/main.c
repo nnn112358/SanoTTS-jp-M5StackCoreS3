@@ -27,6 +27,7 @@
 #include <string.h>
 
 #include "esp_heap_caps.h"
+#include "esp_mmu_map.h"      /* 起動時の mmap 空き量の診断 */
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -39,6 +40,10 @@
 
 #include "demo_ids.h"
 #include "saan_console.h"
+#if SAAN_KANJI
+#include "saan_dict.h"
+#include "saan_kanji.h"
+#endif
 #include "saan_model.h"
 #include "saan_speaker.h"
 #include "saan_ui.h"
@@ -55,6 +60,12 @@ static const char *TAG = "saanotts";
 
 /* 1 = 全部貯めてから鳴らす（先読み量の計算を使わない。発話開始まで = 合成時間）。
  * 0 = **xRT から先読み量を決めて、計算しながら鳴らす**（既定）。 */
+/* 端末内漢字 G2P を入れるか（CMake の -DSAAN_KANJI=0 で外す。既定 1）。
+ * 外すと入力はかな中間表現だけになり、辞書パーティションも要らない。 */
+#ifndef SAAN_KANJI
+#define SAAN_KANJI 0
+#endif
+
 #ifndef SAAN_BUFFERED
 #define SAAN_BUFFERED 0
 #endif
@@ -145,6 +156,13 @@ static int32_t g_ids[SAAN_G2P_IDS_CAP];
  * g_ids は speak_line のたびに上書きされるので、個数と元の文字列だけ別に持つ。
  * ⚠️ **G2P が失敗したら 0 にする。** そのとき g_ids は途中まで書かれた壊れた列で、
  *    前の個数のまま再生すると**それらしい音**が出てしまう。 */
+#if SAAN_KANJI
+/* 端末内漢字 G2P の辞書（flash に mmap したまま使う。RAM には読まない）。
+ * ⚠️ **Viterbi は合成用の g_arena を borrow する。** G2P と合成は同時に走らない。 */
+static k1_dict_t g_dict;
+static bool      g_dict_ok;
+#endif
+
 static int32_t g_last_n_ids;
 static char    g_last_text[SAAN_CONSOLE_LINE_MAX];
 
@@ -163,6 +181,19 @@ typedef char saan_max_ids_check[(SAAN_MAX_IDS <= SAAN_G2P_IDS_CAP) ? 1 : -1];
 
 /* シリアル入力を待つ単位。この間隔でタッチも見る（合成中は見ない）。 */
 #define SAAN_POLL_MS 20
+
+/* flash を mmap できる vaddr がどれだけ残っているか。
+ * ⚠️ CoreS3 では PSRAM 8 MB が同じ 32 MB の MMU 窓を使う。以前 model パーティションの
+ *    mmap（3 MB / 1 MB）が ESP_ERR_NO_MEM で落ちたので、辞書（13.7 MB）を載せる前に
+ *    実測しておく。 */
+static void log_mmap_room(void) {
+    size_t room = 0;
+    esp_err_t e = esp_mmu_map_get_max_consecutive_free_block_size(
+        MMU_MEM_CAP_READ | MMU_MEM_CAP_8BIT, MMU_TARGET_FLASH0, &room);
+    ESP_LOGI(TAG, "flash mmap の最大連続空き: %u B (%.1f MB) [%s]",
+             (unsigned)room, (double)room / 1048576.0, esp_err_to_name(e));
+    esp_mmu_map_dump_mapped_blocks(stdout);
+}
 
 static void log_heap(const char *when) {
     ESP_LOGI(TAG, "%s: 内部 DRAM free %u B / 最大ブロック %u B", when,
@@ -381,6 +412,51 @@ static bool speak_line(const saan_weights *w, const char *text, size_t nbytes) {
     return synth_once(w, g_ids, n_ids);
 }
 
+#if SAAN_KANJI
+/* --- 漢字かな交じり文 1 行 → 合成 ----------------------------------------
+ *
+ * 文 → k1_analyze（辞書 + Viterbi）→ mecab2njd → NJD 8 段 → jpcommon → ラベル → ids。
+ * ⚠️ **ホスト（フル辞書）とは一致しない。** 枝刈りの分だけ読みが変わる文がある
+ *    （sanoTTS-jp 実測 17.79% の文。地名・固有名詞）。**既知の代償**であって欠陥ではない。
+ * ⚠️ 未知語は「無音で消える」のではなく k1_unk_guess が 1 文字ずつ読みを推測する（平板）。 */
+static bool speak_kanji(const saan_weights *w, const char *text, size_t nbytes) {
+    g_last_n_ids = 0;
+    if (nbytes == 0) {
+        ESP_LOGW(TAG, "空行。文を入力すること（例: 今日は良い天気ですね。）");
+        return false;
+    }
+    if (!g_dict_ok) {
+        ESP_LOGE(TAG, "辞書が開けていない。`=` 前置のかな中間表現だけ使える");
+        saan_ui_idle("辞書なし");
+        return false;
+    }
+    int32_t n_ids = 0;
+    int n_tok = 0;
+    int64_t t0 = esp_timer_get_time();
+    saan_kanji_status ks = saan_kanji_to_ids(&g_dict, text, nbytes,
+                                            g_arena, sizeof g_arena,
+                                            g_ids, SAAN_G2P_IDS_CAP, &n_ids, &n_tok);
+    int64_t dt = esp_timer_get_time() - t0;
+    if (ks != SAAN_KANJI_OK) {
+        ESP_LOGE(TAG, "漢字 G2P 失敗: %s", saan_kanji_strerror(ks));
+        saan_ui_idle("読めない");
+        return false;
+    }
+    ESP_LOGI(TAG, "漢字 G2P: %u B → 形態素 %d 個 → ids %d 個 / %.1f ms",
+             (unsigned)nbytes, n_tok, (int)n_ids, (double)dt / 1000.0);
+    if (n_ids > SAAN_MAX_IDS) {
+        ESP_LOGE(TAG, "%d ids は上限 %d を超える。**短く区切って入力すること**", (int)n_ids, (int)SAAN_MAX_IDS);
+        saan_ui_idle("長すぎる");
+        return false;
+    }
+    g_last_n_ids = n_ids;
+    memcpy(g_last_text, text, nbytes);
+    g_last_text[nbytes] = '\0';
+    saan_ui_set_text(g_last_text);
+    return synth_once(w, g_ids, n_ids);
+}
+#endif /* SAAN_KANJI */
+
 /* --- 起動セルフテスト -----------------------------------------------------
  *
  * ⚠️ **kSaanDemoIds は入力ではなく答え合わせの錨。** 合成に使うのは
@@ -422,29 +498,53 @@ static bool boot_selftest(int32_t *n_ids_out) {
     return true;
 }
 
+static void print_usage_kana(void);
+
 static void print_usage(void) {
     ESP_LOGI(TAG, "==================== 対話モード ====================");
-    ESP_LOGI(TAG, "かな中間表現を 1 行入力して Enter で喋る。");
-    ESP_LOGI(TAG, "  例:  きょ][おわよ][いて][んきです°ね     （今日は良い天気ですね。）");
-    ESP_LOGI(TAG, "  例:  こんにちわ");
+#if SAAN_KANJI
+    ESP_LOGI(TAG, "**文をそのまま 1 行入力して Enter で喋る**（漢字かな交じり文。端末内の辞書で読む）。");
+    ESP_LOGI(TAG, "  例:  今日は良い天気ですね。");
+    ESP_LOGI(TAG, "  ⚠️ 辞書は枝刈りしてあるので、ホストと読みが変わる文がある（地名・固有名詞）");
+    ESP_LOGI(TAG, "`=` で始めるとかな中間表現として扱う（突き合わせ用）:");
+#else
+    ESP_LOGI(TAG, "かな中間表現を 1 行入力して Enter で喋る（`=` 前置も可）:");
+#endif
+    print_usage_kana();
+    ESP_LOGI(TAG, "画面をタッチすると直前の文をもう一度喋る。");
+    ESP_LOGI(TAG, "====================================================");
+}
+
+static void print_usage_kana(void) {
+    ESP_LOGI(TAG, "  例:  =きょ][おわよ][いて][んきです°ね     （今日は良い天気ですね。）");
     ESP_LOGI(TAG, "記号:  [ 上昇 / ] 下降核 / # 句境界 / ° 無声化 / ? ?! ?. ?~ 疑問");
     ESP_LOGI(TAG, "⚠️ **漢字・カタカナ・句読点は受け付けない**（端末に辞書が無い）。");
     ESP_LOGI(TAG, "   漢字混じり文からは**ホスト側**（sanoTTS-jp リポジトリ）で作る:");
     ESP_LOGI(TAG, "     uv run python scripts/to_intermediate.py \"今日は良い天気ですね。\"");
     ESP_LOGI(TAG, "⚠️ アクセント記号を省くと平板になる。**音は出るが正しい抑揚ではない。**");
     ESP_LOGI(TAG, "編集: BS/DEL 1 文字消す / Ctrl-U 行を消す / 上限 %d ids", (int)SAAN_MAX_IDS);
-    ESP_LOGI(TAG, "画面をタッチすると直前の文をもう一度喋る。");
-    ESP_LOGI(TAG, "====================================================");
 }
 
 static void tts_task(void *arg) {
     (void)arg;
     log_heap("起動直後");
+    log_mmap_room();
     ESP_LOGI(TAG, "arena %d B を .bss に静的確保 (%p) / G2P の ids %d B",
              (int)SAAN_ARENA_BYTES, (void *)g_arena, (int)sizeof g_ids);
 
     static saan_weights w;
     if (!saan_model_open(&w)) { vTaskDelete(NULL); return; }
+
+#if SAAN_KANJI
+    /* 辞書は重みの後に開く（MMU の窓は flash と PSRAM で共有。起動ログに空き量が出る）。
+     * 開けなくても `=` のかな入力だけで続ける。 */
+    g_dict_ok = saan_dict_open(&g_dict) && (saan_kanji_init() != 0);
+    if (!g_dict_ok)
+        ESP_LOGW(TAG, "辞書を開けなかった（または作業領域を取れなかった）。**かな入力だけ**で続ける");
+    else
+        ESP_LOGI(TAG, "漢字経路の作業領域 %u B", (unsigned)saan_kanji_workbytes());
+    log_heap("辞書 mmap 後");
+#endif
 
 #if SAAN_INT8_ACT
     /* ⚠️ **W8A8/PIE を有効にしても、blob が fp32 なら 1 命令も効かない。**
@@ -514,7 +614,16 @@ static void tts_task(void *arg) {
             saan_console_prompt();
             continue;
         }
-        (void)speak_line(&w, line, (size_t)n);
+        /* `=` 前置はかな中間表現（本家 QEMU と突き合わせる用）。
+         * 漢字対応ビルドではそれ以外を文そのものとして辞書で読む。 */
+        const char *body = (n > 0 && line[0] == '=') ? line + 1 : line;
+        size_t body_n = (n > 0 && line[0] == '=') ? (size_t)n - 1 : (size_t)n;
+#if SAAN_KANJI
+        if (body != line) (void)speak_line(&w, body, body_n);
+        else              (void)speak_kanji(&w, body, body_n);
+#else
+        (void)speak_line(&w, body, body_n);
+#endif
         saan_console_prompt();
     }
 
