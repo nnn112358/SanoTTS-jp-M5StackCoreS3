@@ -51,7 +51,6 @@ M5Stack CoreS3 / ESP-IDF v5.5.5 / -O2 / 240 MHz / PSRAM ON / 22.05 kHz 直接再
 
 ## 未測定・未確認
 
-- 聴取での品質確認（音量 `SAAN_SPK_VOLUME 128` の適否を含む）
 - 実サンプルレートの誤差（ESP32-S3 に APLL が無い）。`M5.Speaker.isPlaying()` は最後の
   チャンクを DMA に渡した時点で false になるので、再生時間からは測れない
 - D-cache 32 KB と 64 KB の速度差
@@ -106,7 +105,6 @@ docs/design-notes.md「再生パイプライン」）。
 - ⚠️ `CONFIG_SPI_FLASH_ROM_IMPL=y` だと辞書の mmap が `ESP_ERR_NO_MEM` で落ちる（ROM の旧実装に
   差し替わる）。`n` に戻した（IRAM 約 8 KB 増）
 - ⚠️ 静的 DIRAM の残りが 15 KB と薄い。足りなくなったら `-DSAAN_CORE_IRAM=0`（+10 KB、xRT +2.4%）
-- 聴取はしていない
 
 ### 自由入力（かな・カタカナ・挨拶）— `logs/2026-09-02_kana_free_input.log` ほか
 

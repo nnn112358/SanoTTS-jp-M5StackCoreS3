@@ -35,8 +35,8 @@ static const char *TAG = "saan_spk";
 #define SAAN_SPK_OUT_RATE 22050
 #endif
 
-/* 既定音量（0-255）。⚠️ **聴取で決めること。** 大きすぎると int16 の
- * クリップではなくアンプ側で歪む（クリップカウンタには出ない）。 */
+/* 既定音量（0-255）。大きすぎると int16 のクリップではなくアンプ側で歪む
+ * （クリップカウンタには出ない）。 */
 #ifndef SAAN_SPK_VOLUME
 #define SAAN_SPK_VOLUME 128
 #endif
