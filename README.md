@@ -19,7 +19,7 @@ ESP-IDF プロジェクト。クラウドも辞書も不要。
 
 | | |
 |---|---|
-| ボード | **M5Stack CoreS3**（ESP32-S3 / 16 MB flash / 8 MB Quad PSRAM） |
+| ボード | **M5Stack CoreS3**（ESP32-S3 / 16 MB flash / 8 MB Quad PSRAM）。Tab5 は [別リポジトリ](https://github.com/nnn112358/SanoTTS-jp-Tab5) |
 | ESP-IDF | **v5.5.5**（`~/esp/esp-idf` に置く前提。`idf.sh` 参照） |
 | Python | `uv`（ビルド時のヘッダ生成に使う。stdlib のみ） |
 | ネットワーク | 初回ビルドで M5Unified / M5GFX を Component Registry から取得 |
@@ -43,6 +43,11 @@ cd SanoTTS-jp-M5StackCoreS3
 | `-DSAAN_KANJI=0/1` | **1** | 端末内漢字 G2P（辞書 13.7 MB + Open JTalk）。0 で外すと入力はかな中間表現だけ、辞書も焼かない |
 
 `-D` の値は `build/` を消すまで CMake キャッシュに残る。
+
+### M5Stack Tab5（ESP32-P4）
+
+Tab5 向けは別リポジトリに分けた: **[SanoTTS-jp-Tab5](https://github.com/nnn112358/SanoTTS-jp-Tab5)**
+（Tab5 Keyboard でローマ字入力、横画面、P4 向けの設定）。このリポジトリは CoreS3 専用。
 CoreS3 は native USB なので `/dev/ttyACM0`（権限が無ければ
 `SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", MODE="0666"` を udev に）。
 
