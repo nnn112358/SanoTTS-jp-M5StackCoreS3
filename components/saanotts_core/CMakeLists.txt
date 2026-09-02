@@ -8,6 +8,18 @@
 #
 # ⚠️ **コピーなので本家と乖離しうる。** 本家 csrc/ を直したらここにも持ってくること。
 #    golden test（bit 一致）は本家側の `make -C csrc all-test` で回す。
+# --- 推論コアを IRAM に置く（**既定で有効**。-DSAAN_CORE_IRAM=0 で flash に戻す）------
+#     ./idf.sh -DSAAN_CORE_IRAM=1 build
+# CoreS3 実測: xRT 1.655 → 1.616（−2.4%）。IRAM を約 10 KB 使う。
+if(NOT DEFINED SAAN_CORE_IRAM)
+    set(SAAN_CORE_IRAM 1)
+endif()
+set(SAAN_CORE_LDFRAGS "")
+if(SAAN_CORE_IRAM)
+    set(SAAN_CORE_LDFRAGS "linker.lf")
+    message(STATUS "sanoTTS: 推論コアの .text を IRAM に置く（linker.lf）")
+endif()
+
 idf_component_register(
     SRCS "saanotts.c"
          "saanotts_stream.c"
@@ -17,6 +29,7 @@ idf_component_register(
          "line.c"
     INCLUDE_DIRS "."
     REQUIRES ""
+    LDFRAGMENTS ${SAAN_CORE_LDFRAGS}
 )
 
 # ⚠️ **SAAN_FFT_DOUBLE と SAAN_USE_NAIVE_DFT は定義しない。**

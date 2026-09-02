@@ -1,0 +1,6 @@
+## m5stack-avatar（vendored）。M5Unified に依存する。
+dependencies:
+  idf:
+    version: ">=5.0"
+  m5stack/m5unified:
+    version: "^0.2.0"

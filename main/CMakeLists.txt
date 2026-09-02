@@ -14,7 +14,7 @@ idf_component_register(
          "saan_speaker.cpp"
          "saan_ui.cpp"
     INCLUDE_DIRS "."
-    REQUIRES saanotts_core esp_timer esp_driver_usb_serial_jtag esp_driver_uart
+    REQUIRES saanotts_core m5stack-avatar esp_timer esp_driver_usb_serial_jtag esp_driver_uart
 )
 
 # --- 重み blob → `const` 配列のヘッダ ---------------------------------------

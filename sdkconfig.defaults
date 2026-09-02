@@ -62,6 +62,9 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # ⚠️ **32 KB とどちらが速いかは実測していない。**
 CONFIG_ESP32S3_DATA_CACHE_64KB=y
 CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
+# D-cache のライン長 64 B（既定 32 B）。重みを flash から順に読むので 1 回のミスで倍取り込める。
+# CoreS3 実測: xRT 1.655 → 1.598（−3.4%）。checksum は変わらない。
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
 
 # 1 発話の合成は数秒かかる。タスク WDT に噛まれないようにする。
 CONFIG_ESP_TASK_WDT_INIT=n

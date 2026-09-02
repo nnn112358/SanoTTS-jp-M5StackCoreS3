@@ -1,87 +1,101 @@
-/* 画面とタッチ — M5GFX 版。設計は saan_ui.h を読むこと。
+/* 顔とタッチ — m5stack-avatar 版。設計は saan_ui.h を読むこと。
  *
- * フォントは M5GFX 同梱の lgfxJapanGothic_20（IPA ゴシック由来、U8g2 形式）。
- * ⚠️ **フォントは flash (.rodata) に置かれる。** サイズごとに別の配列なので、
- *    使うサイズを増やすとそのぶん app が太る（1 サイズで数百 KB）。1 サイズで済ませる。
+ * avatar.init() が描画タスク（drawLoop 優先度 1 / facialLoop 優先度 2）を core 1 に作る。
+ * リップシンクの lip_task も core 1（優先度 2）。合成タスクは core 0（main.c）。
+ * ⚠️ **合成タスクと同じ core に置かない。** 合成は数秒間 CPU を手放さないので、
+ *    同じ core の低優先度タスクは止まる（顔が固まる）。
  */
 #include <M5Unified.h>
+#include <Avatar.h>
 
-#include <stdarg.h>
-#include <stdio.h>
+#include <string.h>
 
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
-#include "saan_model.h"   /* SAAN_MODEL_ORIGIN_* */
+#include "saan_speaker.h"
 #include "saan_ui.h"
+
+using namespace m5avatar;
 
 static const char *TAG = "saan_ui";
 
-static bool s_ready;
+static Avatar s_avatar;
+static bool   s_ready;
 
-/* 下段の開始 y。240 px のうち下 52 px をステータスに使う（2 行） */
-#define UI_STATUS_Y 188   /* 2 行ぶん（20 px フォント × 2 + 余白） */
-#define UI_MARGIN_X 4
+/* 吹き出しの文。UTF-8 で SAAN_UI_TEXT_CHARS 文字に切り詰める（吹き出しは右下に
+ * 固定幅なので、長い行は顔を覆う）。 */
+#define SAAN_UI_TEXT_CHARS 14
+static char s_text[SAAN_UI_TEXT_CHARS * 4 + 4];
 
-static const lgfx::IFont *ui_font(void) { return &fonts::lgfxJapanGothic_20; }
+/* lip_task の統計（speaking() でリセット）。「口が動いたか」をログで確認するため。 */
+static volatile uint32_t s_lip_frames, s_lip_open;
+static volatile float    s_lip_max;
+
+/* 口の開き = 再生中の音量。saan_speaker が包絡（512 sample ごとの RMS）と
+ * 再生位置を持っているので、ここは読んで渡すだけ。 */
+static void lip_task(void *arg) {
+    DriveContext *ctx = reinterpret_cast<DriveContext *>(arg);
+    Avatar *av = ctx->getAvatar();
+    for (;;) {
+        float r = saan_speaker_level_now();
+        av->setMouthOpenRatio(r);
+        ++s_lip_frames;
+        if (r > 0.1f) ++s_lip_open;
+        if (r > s_lip_max) s_lip_max = r;
+        vTaskDelay(pdMS_TO_TICKS(33));
+    }
+}
 
 bool saan_ui_init(void) {
     if (M5.getBoard() == m5::board_t::board_unknown) {
         ESP_LOGE(TAG, "M5.begin() がまだ。saan_speaker_setup() の後に呼ぶこと");
         return false;
     }
-    auto &d = M5.Display;
-    d.fillScreen(TFT_BLACK);
-    d.setFont(ui_font());
-    d.setTextSize(1);
-    d.setTextWrap(true, false);
+    s_avatar.setSpeechFont(&fonts::lgfxJapanGothic_16);
+    s_avatar.init();   /* drawLoop / facialLoop を core 1 に作る */
+    s_avatar.addTask(lip_task, "lipSync", 2048, 2, NULL, APP_CPU_NUM);
     s_ready = true;
-    ESP_LOGI(TAG, "画面 %d x %d / フォント lgfxJapanGothic_20", (int)d.width(), (int)d.height());
+    ESP_LOGI(TAG, "m5stack-avatar 起動（core %d）/ 吹き出し lgfxJapanGothic_16 / リップシンク 33 ms",
+             (int)APP_CPU_NUM);
     return true;
 }
 
-void saan_ui_show(const char *title, const char *kana) {
-    if (!s_ready) return;
-    auto &d = M5.Display;
-    d.fillRect(0, 0, d.width(), UI_STATUS_Y, TFT_BLACK);
-    d.setFont(ui_font());
-    d.setTextWrap(true, false);
-
-    d.setCursor(UI_MARGIN_X, 6);
-    if (title != NULL && title[0] != '\0') {
-        d.setTextColor(TFT_WHITE, TFT_BLACK);
-        d.print(title);
-        d.print("\n");
-        d.setCursor(UI_MARGIN_X, d.getCursorY() + 10);
+void saan_ui_set_text(const char *text) {
+    if (text == NULL) { s_text[0] = '\0'; return; }
+    size_t n = strlen(text), i = 0, chars = 0;
+    while (i < n && chars < SAAN_UI_TEXT_CHARS) {
+        size_t len = 1;
+        unsigned char c = (unsigned char)text[i];
+        if (c >= 0xF0) len = 4; else if (c >= 0xE0) len = 3; else if (c >= 0xC0) len = 2;
+        if (i + len > n) break;
+        i += len; ++chars;
     }
-    d.setTextColor(TFT_CYAN, TFT_BLACK);
-    if (kana != NULL) d.print(kana);
-
-    /* 出典を常時表示する（NOTICE.md の帰属表示の要約）。
-     * Font0 は M5GFX 組み込みの 6x8 ASCII で、日本語フォントと違い flash を食わない。 */
-    d.setFont(&fonts::Font0);
-    d.setTextWrap(false, false);
-    d.setTextColor(TFT_DARKGREY, TFT_BLACK);
-    d.setCursor(UI_MARGIN_X, UI_STATUS_Y - 12);
-    d.print("model: " SAAN_MODEL_ORIGIN_NAME "  " SAAN_MODEL_ORIGIN_URL);
-    d.setFont(ui_font());
+    memcpy(s_text, text, i);
+    s_text[i] = '\0';
+    if (i < n) strcat(s_text, "…");
 }
 
-void saan_ui_status(const char *fmt, ...) {
+void saan_ui_thinking(void) {
     if (!s_ready) return;
-    char buf[128];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(buf, sizeof buf, fmt, ap);
-    va_end(ap);
+    s_avatar.setExpression(Expression::Doubt);
+    s_avatar.setMouthOpenRatio(0.0f);
+    s_avatar.setSpeechText("…");
+}
 
-    auto &d = M5.Display;
-    d.fillRect(0, UI_STATUS_Y, d.width(), d.height() - UI_STATUS_Y, TFT_BLACK);
-    d.drawFastHLine(0, UI_STATUS_Y, d.width(), TFT_DARKGREY);
-    d.setFont(ui_font());
-    d.setTextWrap(true, false);   /* 2 行目へ折り返す（\n も可） */
-    d.setTextColor(TFT_YELLOW, TFT_BLACK);
-    d.setCursor(UI_MARGIN_X, UI_STATUS_Y + 5);
-    d.print(buf);
+void saan_ui_speaking(void) {
+    if (!s_ready) return;
+    s_lip_frames = 0; s_lip_open = 0; s_lip_max = 0.0f;
+    s_avatar.setExpression(Expression::Happy);
+    s_avatar.setSpeechText(s_text);
+}
+
+void saan_ui_idle(const char *status) {
+    if (!s_ready) return;
+    s_avatar.setExpression(Expression::Neutral);
+    s_avatar.setMouthOpenRatio(0.0f);
+    s_avatar.setSpeechText(status != NULL ? status : "");
 }
 
 bool saan_ui_poll_touch(void) {
@@ -96,4 +110,10 @@ bool saan_ui_poll_touch(void) {
         }
     }
     return false;
+}
+
+void saan_ui_lip_stats(uint32_t *frames, uint32_t *frames_open, float *max_ratio) {
+    if (frames) *frames = s_lip_frames;
+    if (frames_open) *frames_open = s_lip_open;
+    if (max_ratio) *max_ratio = s_lip_max;
 }

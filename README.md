@@ -4,7 +4,8 @@
 [arXiv:2608.21378](https://arxiv.org/abs/2608.21378) の日本語版）を **M5Stack CoreS3 単体**で動かす
 ESP-IDF プロジェクト。クラウドも辞書も不要。
 
-- 起動すると画面に `今日は良い天気ですね。` を出して内蔵スピーカーで喋る
+- 起動すると [m5stack-avatar](https://github.com/stack-chan/m5stack-avatar) の顔が出て、
+  `今日は良い天気ですね。` を吹き出しに出しながら内蔵スピーカーで喋る（**口は音量に合わせて動く**）
 - **画面をタッチ**すると直前の文をもう一度喋る
 - USB シリアルの `かな> ` にかな中間表現（例: `きょ][おわよ][いて][んきです°ね`）を打つと、その文を喋る
 
@@ -34,7 +35,7 @@ cd SanoTTS-jp-M5StackCoreS3
 | フラグ | 既定 | 意味 |
 |---|---|---|
 | `-DSAAN_ENABLE_PIE=0/1` | **1** | W8A8 + ESP32-S3 の整数 SIMD (PIE)。0 = W8A32 / 移植可能 C |
-| `-DSAAN_BUFFERED=0/1` | **0** | 1 = 1 発話ぶんを貯めてから鳴らす（**途切れない**。待ち ≒ 音声長 × 1.55 + 0.8 s） |
+| `-DSAAN_BUFFERED=0/1` | **0** | 0 = xRT から先読み量を決めて計算しながら鳴らす / 1 = 全部貯めてから鳴らす |
 | `-DSAAN_BOOT_SPEAK=0/1` | **1** | 起動時に 1 文喋る |
 
 `-D` の値は `build/` を消すまで CMake キャッシュに残る。
@@ -42,14 +43,15 @@ CoreS3 は native USB なので `/dev/ttyACM0`（権限が無ければ
 `SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", MODE="0666"` を udev に）。
 
 ## 現状
-
-実機（CoreS3 / 240 MHz）で **W8A8 + PIE は定常 1.55× RT**。ストリーミングでは途切れるので、
-途切れない再生が要るなら `-DSAAN_BUFFERED=1`。出力 PCM は sanoTTS-jp の QEMU 記録と
-27,136 sample すべて bit 一致（移植は正しい）。聴取での品質確認はしていない。
+実機（CoreS3 / 240 MHz）で **W8A8 + PIE は定常 1.56× RT**（合成が再生より遅い。顔の描画込み）。
+そこで音声の (1 − 1/xRT) + 2 チャンク ≒ 60% を先に貯めてから鳴らし始め、以後は計算しながら鳴らす
+（1.2 秒の文で発話開始まで 1.8 s、途切れ 0。xRT は毎回実測して次の発話に反映）。出力 PCM は sanoTTS-jp の QEMU 記録と 27,136 sample
+すべて bit 一致（移植は正しい）。聴取での品質確認はしていない。
 
 詳細:
 - [`docs/measurements.md`](docs/measurements.md) — 速度・正しさ・メモリの実測値
 - [`docs/design-notes.md`](docs/design-notes.md) — 構成、入力仕様、CoreS3 で踏んだことと対処
+- [`docs/upstream-comparison.md`](docs/upstream-comparison.md) — 公式実装 Ampixa/sanoTTS との違いと、0.22× RT に至った手順（公開文書とログのみ）
 
 ## 出所とライセンス
 
@@ -59,5 +61,6 @@ CoreS3 は native USB なので `/dev/ttyACM0`（権限が無ければ
 | CoreS3 向けの変更（M5.Speaker / 画面 / タッチ） | このリポジトリ | MIT（[`LICENSE`](LICENSE)） |
 | **`model/student_i8.bin`** | **sanoTTS-jp Release `saanotts-jp-v3-int8.bin`**（SHA-256 `c3b89216…`、[`model/README.md`](model/README.md)） | **sanoTTS-jp Model License 1.0** |
 | M5Unified / M5GFX | ESP-IDF Component Registry | MIT（日本語フォントは IPA Font License） |
+| m5stack-avatar 0.10.0（`components/m5stack-avatar/`） | [stack-chan/m5stack-avatar](https://github.com/stack-chan/m5stack-avatar)（vendored） | MIT |
 
 ライセンス全文は [`LICENSES/`](LICENSES/)、モデルの帰属表示ブロックと生成音声の用途制限は [`NOTICE.md`](NOTICE.md)。

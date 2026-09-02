@@ -2,19 +2,16 @@
  *
  * ⚠️ **`playRaw` はデータをコピーしない。** Speaker_Class.cpp の `_play_raw` は
  *    `info.data = data;` とポインタを持つだけ。**再生が終わるまでバッファを
- *    書き換えてはいけない。** チャンクを 1 枚のバッファで使い回すと、
- *    **音は出るが前のチャンクの尾が次の内容で上書きされる**（無音にならないので
- *    「鳴った」で見落とす種類の壊れ方）。→ SAAN_SPK_NBUF 枚で回す。
+ *    書き換えてはいけない。** 1 発話を連続バッファ 1 本に**追記だけ**するので、
+ *    渡した区間が後から書き換わることはない。解放は stop() で再生完了を待ってから。
  *
  * ⚠️ **キューは 1 チャンネルあたり 2 枚**（`wav_info_t wavinfo[2]`）。
- *    `_set_next_wav` は満杯のときセマフォ待ちで**ブロックする**ので、
- *    合成ループの流量制御はこれに任せる。
- *    生きているポインタは最大 2 本なので、**3 枚あれば書き込み先は必ず空き**。
+ *    `isPlaying(ch)` が 0 / 1 / 2（= 空き無し）を返すので、pump() は 2 のときは
+ *    渡さずに戻る（ブロックしない）。区間はまとめて渡すので枚数は問題にならない。
  *
  * ⚠️ **サンプルレートはコアと同じ 22,050 Hz で I2S を回す**（SAAN_SPK_OUT_RATE）。
  *    `playRaw(..., 22050)` と speaker_config_t.sample_rate が一致するので M5 側の
  *    リサンプルは通らない。AW88298 は 22.05 kHz を対応レートとして持つ。
- *    ⚠️ ESP32-S3 に APLL が無い件は変わらない。**実サンプルレートの誤差は未測定。**
  *
  * ⚠️ **checksum は M5 に渡す前の int16 で取る。** `saan_f32_to_i16()` は
  *    本家 saan_i2s.c から**逐語コピー**してある。本家の記録値（M-62）と
@@ -28,15 +25,12 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #include "saan_speaker.h"
 
 static const char *TAG = "saan_spk";
 
-/* M5.Speaker が実際に出す I2S のサンプルレート。**コアと同じ 22,050 Hz** にして
- * M5 側のリサンプルを通さない。AW88298 は 22.05 kHz を対応レートとして持ち
- * （レジスタ 0x06 I2SSR）、M5Unified の config() → begin() が I2S と AW88298 の
- * 両方をこの値にそろえる。 */
 #ifndef SAAN_SPK_OUT_RATE
 #define SAAN_SPK_OUT_RATE 22050
 #endif
@@ -47,28 +41,41 @@ static const char *TAG = "saan_spk";
 #define SAAN_SPK_VOLUME 128
 #endif
 
-/* 回すバッファの枚数。**3 未満にしないこと**（上の ⚠️ を読むこと）。 */
-#ifndef SAAN_SPK_NBUF
-#define SAAN_SPK_NBUF 3
-#endif
-#if SAAN_SPK_NBUF < 3
-#error "SAAN_SPK_NBUF は 3 以上。playRaw はポインタを持つだけで、キューは 2 枚ある"
+#define SAAN_SPK_CH 0   /* 使う仮想チャンネル */
+
+/* リップシンク包絡の 1 ブロック（sample）。512 = 23.2 ms。lip_task の 33 ms より細かい */
+#define SAAN_ENV_BLOCK 512
+
+/* playRaw してから実際に鳴るまでの遅れ（DMA バッファぶん）の見込み。
+ * ⚠️ **測っていない。** 2,048 sample = 93 ms の DMA バッファの半分を仮置き。 */
+#ifndef SAAN_LIP_LATENCY_MS
+#define SAAN_LIP_LATENCY_MS 45
 #endif
 
-#define SAAN_SPK_MAXBUF 2048   /* 1 チャンク = 2,048 sample = 92.88 ms */
+/* M5.Speaker が DMA へ詰めるために**再生位置より先に読む**量（sample）。
+ * dma_buf_len 256 × count 8 = 2,048。合成はこの先まで書いておく必要がある。
+ * ⚠️ 実測していない（M5Unified の既定値から）。 */
+#define SAAN_SPK_READAHEAD 2048
 
-/* ⚠️ **ヒープから一度だけ確保し、二度と解放しない。** `playRaw` が持っている
- *    ポインタの生存期間はプログラムと同じでなければならない。
- *    合わせて 28,672 B。PSRAM があればそちら、無ければ内部 DRAM（spk_alloc）。
- * ⚠️ **スタックには置けない**（saan_irfft_1024 の自動変数 4,128 B と衝突する）。 */
-static int16_t *s_ring[SAAN_SPK_NBUF];
-static size_t   s_ring_idx;
-static int16_t *s_preroll;
-static size_t   s_preroll_cap;   /* begin_utterance で取った量（sample） */
-static size_t   s_preroll_fill;
+/* 発話バッファ（begin_utterance で取り、stop で解放） */
+static int16_t *s_buf;
+static size_t   s_cap;                   /* 総サンプル数 */
+static volatile size_t s_fill;           /* 変換済み（= 貯めた）サンプル数 */
+static size_t   s_sent;                  /* キューに渡したサンプル数 */
+static bool     s_started;
 
 static uint32_t s_clips;
 static bool     s_ready;
+
+/* --- リップシンク --------------------------------------------------------- */
+static uint8_t *s_env;                   /* SAAN_ENV_BLOCK ごとの RMS/16（0..255）。PSRAM */
+static size_t   s_env_cap;               /* 要素数（伸ばすだけで縮めない） */
+static volatile uint8_t s_env_max;       /* この発話の包絡の最大（正規化用） */
+static uint64_t s_blk_sum;               /* いまのブロックの Σx² */
+static size_t   s_blk_n;
+static volatile int64_t s_play_t0_us;    /* 鳴らし始めた時刻 */
+static volatile size_t  s_play_base;     /* その時刻に鳴り始めたサンプル位置 */
+static volatile bool    s_playing;
 
 /* --- 以下 4 つの統計は本家 saan_i2s.c から逐語コピー --------------------- */
 static uint64_t s_pcm_fnv = 1469598103934665603ull;
@@ -96,7 +103,6 @@ void saan_pcm_reset(void) {
     s_pcm_absmax = 0;
     s_pcm_sqsum = 0;
     s_clips = 0;
-    s_preroll_fill = 0;   /* ⚠️ 前の発話の残りを次に混ぜない */
 }
 
 uint32_t saan_speaker_clip_count(void) { return s_clips; }
@@ -104,85 +110,133 @@ uint64_t saan_pcm_checksum(void)       { return s_pcm_fnv; }
 uint32_t saan_pcm_samples(void)        { return s_pcm_n; }
 int32_t  saan_pcm_absmax(void)         { return s_pcm_absmax; }
 uint64_t saan_pcm_sqsum(void)          { return s_pcm_sqsum; }
+size_t   saan_speaker_buffered(void)   { return s_fill; }
+size_t   saan_speaker_sent(void)       { return s_sent; }
 
 /* --- バッファ確保 ---------------------------------------------------------
  *
  * まず PSRAM、無ければ内部 DRAM から取る。
- *
- * ⚠️ **PSRAM を切る構成がある。** CoreS3 で CONFIG_SPIRAM=y にすると
- *    8 MB の PSRAM が flash の data mmap 用 vaddr を食い、重み blob の
- *    `esp_partition_mmap` が **ESP_ERR_NO_MEM** で落ちる（実機実測）。
- *    そのとき PSRAM を切るので、ここは内部 DRAM に落ちられる必要がある。
  * ⚠️ **DMA から読まれるバッファではない。** M5.Speaker はここを **CPU で**読んで
  *    自前の DMA バッファへミックスするので、PSRAM でも動く。
  * ⚠️ **どちらから取れたかを必ずログに出す。** 黙って内部に落ちると、
- *    DRAM が 28,672 B 減った理由が分からなくなる。 */
-static int16_t *spk_alloc(size_t n_samples, const char *what) {
-    const size_t nb = n_samples * sizeof(int16_t);
-
+ *    DRAM が減った理由が分からなくなる。 */
+static void *spk_alloc_bytes(size_t nb, const char *what) {
     void *p = heap_caps_malloc(nb, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (p != NULL) {
-        ESP_LOGI(TAG, "%s (%u B) を PSRAM に確保", what, (unsigned)nb);
-        return (int16_t *)p;
-    }
-
+    if (p != NULL) return p;
     p = heap_caps_malloc(nb, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (p == NULL) {
-        ESP_LOGE(TAG, "%s (%u B) を確保できない（PSRAM も内部 DRAM も）",
-                 what, (unsigned)nb);
+        ESP_LOGE(TAG, "%s (%u B) を確保できない（PSRAM も内部 DRAM も）", what, (unsigned)nb);
         return NULL;
     }
-    ESP_LOGW(TAG, "%s (%u B) を**内部 DRAM**から確保した（PSRAM が無い構成）",
-             what, (unsigned)nb);
-    return (int16_t *)p;
+    ESP_LOGW(TAG, "%s (%u B) を**内部 DRAM**から確保した（PSRAM が無い構成）", what, (unsigned)nb);
+    return p;
+}
+
+/* --- 変換 + 包絡 ----------------------------------------------------------
+ *
+ * 変換は必ずここを通す（checksum と包絡を同じ列から取るため）。
+ * 包絡: 発話先頭から SAAN_ENV_BLOCK sample ごとの RMS/16。ブロック境界は発話先頭からの
+ * 絶対位置で決まるので、チャンク長が 512 の倍数でなくても正しい。 */
+static void conv_block(const float *pcm, int16_t *dst, size_t base, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        int16_t v = saan_f32_to_i16(pcm[i]);
+        dst[i] = v;
+        s_blk_sum += (uint64_t)((int32_t)v * (int32_t)v);
+        if (++s_blk_n == SAAN_ENV_BLOCK) {
+            uint32_t rms = (uint32_t)sqrtf((float)(s_blk_sum / SAAN_ENV_BLOCK));
+            uint32_t e = rms / 16;
+            if (e > 255) e = 255;
+            size_t idx = (base + i) / SAAN_ENV_BLOCK;
+            if (s_env != NULL && idx < s_env_cap) s_env[idx] = (uint8_t)e;
+            if (e > s_env_max) s_env_max = (uint8_t)e;
+            s_blk_sum = 0;
+            s_blk_n = 0;
+        }
+    }
+}
+
+float saan_speaker_level_now(void) {
+    if (!s_playing || s_env == NULL) return 0.0f;
+    if (M5.Speaker.isPlaying(SAAN_SPK_CH) == 0) return 0.0f;
+    int64_t dt = esp_timer_get_time() - s_play_t0_us - (int64_t)SAAN_LIP_LATENCY_MS * 1000;
+    if (dt < 0) return 0.0f;
+    size_t pos = s_play_base + (size_t)(dt * 22050 / 1000000);
+    if (pos >= s_fill) return 0.0f;              /* まだ変換していない / 途切れ */
+    size_t idx = pos / SAAN_ENV_BLOCK;
+    if (idx >= s_env_cap) return 0.0f;
+    uint32_t e = s_env[idx];
+    uint32_t m = s_env_max;
+    if (m < 32) m = 32;                           /* 無音に近い発話で 0/0 を作らない */
+    if (e < 6) return 0.0f;                       /* 床（RMS < 96）。息の音で口が震えない */
+    float r = (float)e / (float)m;
+    return r > 1.0f ? 1.0f : r;
 }
 
 /* --- M5 への送出 ---------------------------------------------------------- */
 
-static bool spk_play(const int16_t *p, size_t n) {
-    /* repeat=1 / channel=0 / stop_current=false。
-     * ⚠️ キューが満杯なら _set_next_wav がブロックして戻ってくる。
-     *    false が返るのは「もう片方のスロットが無限ループ再生」のときだけで、
+/* [s_sent, s_fill) を 1 区間として渡す。呼ぶ前にキューの空きを見ること。 */
+static bool send_pending(void) {
+    size_t n = s_fill - s_sent;
+    if (n == 0) return true;
+    /* 止まっていたなら、この区間が今から鳴る。再生時計を取り直す */
+    if (M5.Speaker.isPlaying(SAAN_SPK_CH) == 0) {
+        s_play_base  = s_sent;
+        s_play_t0_us = esp_timer_get_time();
+    }
+    /* repeat=1 / stop_current=false。
+     * ⚠️ false が返るのは「もう片方のスロットが無限ループ再生」のときだけで、
      *    ここでは起こらないが、**握りつぶさずに落とす**。 */
-    if (!M5.Speaker.playRaw(p, n, 22050, false, 1, 0, false)) {
+    if (!M5.Speaker.playRaw(s_buf + s_sent, n, 22050, false, 1, SAAN_SPK_CH, false)) {
         ESP_LOGE(TAG, "M5.Speaker.playRaw が false を返した (%u sample)", (unsigned)n);
         return false;
     }
+    s_sent += n;
     return true;
 }
 
-bool saan_speaker_begin_utterance(size_t n_samples) {
-    if (n_samples == 0) { ESP_LOGE(TAG, "0 sample の発話"); return false; }
-    if (s_preroll != NULL) {
+bool saan_speaker_begin_utterance(size_t total_samples) {
+    if (total_samples == 0) { ESP_LOGE(TAG, "0 sample の発話"); return false; }
+    if (s_buf != NULL) {
         /* stop() を呼ばずに次の発話に来た。前の再生が終わっているとは限らない。 */
         ESP_LOGW(TAG, "前の発話のバッファが残っている。再生完了を待って解放する");
         saan_speaker_stop();
     }
-    s_preroll = spk_alloc(n_samples, "発話バッファ");
-    if (s_preroll == NULL) return false;
-    s_preroll_cap  = n_samples;
-    s_preroll_fill = 0;
+    s_buf = (int16_t *)spk_alloc_bytes(total_samples * sizeof(int16_t), "発話バッファ");
+    if (s_buf == NULL) return false;
+    /* ⚠️ **ゼロ埋めする。** start() は「まだ書いていない残り全部」もキューに渡す。
+     *    合成が追い越されたとき、ゴミではなく無音が鳴るようにするため。 */
+    memset(s_buf, 0, total_samples * sizeof(int16_t));
+    s_cap  = total_samples;
+    s_fill = 0;
+    s_sent = 0;
+    s_started = false;
+
+    /* 包絡は伸ばすだけ（lip_task が読んでいる最中に free しないため） */
+    size_t need = (total_samples + SAAN_ENV_BLOCK - 1) / SAAN_ENV_BLOCK;
+    if (need > s_env_cap) {
+        uint8_t *e = (uint8_t *)spk_alloc_bytes(need, "リップシンク包絡");
+        if (e == NULL) return false;
+        s_playing = false;
+        uint8_t *old = s_env;
+        s_env = e;
+        s_env_cap = need;
+        if (old != NULL) heap_caps_free(old);
+    }
+    memset(s_env, 0, s_env_cap);
+    s_env_max = 0;
+    s_blk_sum = 0;
+    s_blk_n   = 0;
+    s_playing = false;
     return true;
 }
 
 bool saan_speaker_setup(uint32_t sample_rate) {
     if (sample_rate != 22050u) {
-        ESP_LOGE(TAG, "想定外のサンプルレート %u（コアは 22,050 Hz 固定）",
-                 (unsigned)sample_rate);
+        ESP_LOGE(TAG, "想定外のサンプルレート %u（コアは 22,050 Hz 固定）", (unsigned)sample_rate);
         return false;
     }
 
-    /* ⚠️ **M5.begin() より先に取る。** 失敗したら M5 を初期化しないで戻る。 */
-    if (s_ring[0] == NULL) {
-        for (int i = 0; i < SAAN_SPK_NBUF; ++i) {
-            s_ring[i] = spk_alloc(SAAN_SPK_MAXBUF, "リングバッファ");
-            if (s_ring[i] == NULL) return false;
-        }
-    }
-
     auto cfg = M5.config();
-    /* ⚠️ **ディスプレイは clear しない。** 起動ログを消してしまうと
-     *    実機で最初に見たい情報が消える。 */
     cfg.clear_display = false;
     cfg.internal_mic  = false;   /* 使わない。マイクとスピーカーは排他の板もある */
     cfg.internal_spk  = true;
@@ -191,8 +245,7 @@ bool saan_speaker_setup(uint32_t sample_rate) {
     auto scfg = M5.Speaker.config();
     scfg.sample_rate = SAAN_SPK_OUT_RATE;
     scfg.stereo      = false;
-    /* dma_buf_len/count は既定（256 × 8 = 2,048 sample ≒ 46 ms @44.1k）のまま。
-     * ⚠️ 減らすとアンダーランしやすくなる。**実機で測るまで触らない。** */
+    /* dma_buf_len/count は既定（256 × 8 = 2,048 sample ≒ 93 ms @22.05k）のまま。 */
     M5.Speaker.config(scfg);
 
     if (!(M5.Speaker.begin() && M5.Speaker.isEnabled())) {
@@ -204,72 +257,82 @@ bool saan_speaker_setup(uint32_t sample_rate) {
     }
     M5.Speaker.setVolume(SAAN_SPK_VOLUME);
 
-    ESP_LOGI(TAG, "M5.Speaker: 出力 %d Hz / 音源 22,050 Hz%s"
-                  " / volume %d / バッファ %d 枚 × %d sample",
+    ESP_LOGI(TAG, "M5.Speaker: 出力 %d Hz / 音源 22,050 Hz%s / volume %d",
              (int)SAAN_SPK_OUT_RATE,
              SAAN_SPK_OUT_RATE == 22050 ? "（リサンプル無し）" : "（M5 側でリサンプル）",
-             (int)SAAN_SPK_VOLUME, (int)SAAN_SPK_NBUF, (int)SAAN_SPK_MAXBUF);
+             (int)SAAN_SPK_VOLUME);
     ESP_LOGW(TAG, "⚠️ 実サンプルレートの誤差は**未測定**（S3 に APLL は無い）");
 
-    s_ring_idx = 0;
     s_ready = true;
     return true;
 }
 
-bool saan_speaker_preroll_push(const float *pcm, size_t n_samples) {
-    if (s_preroll == NULL) {
+bool saan_speaker_push_f32(const float *pcm, size_t n_samples) {
+    if (s_buf == NULL) {
         ESP_LOGE(TAG, "saan_speaker_begin_utterance が済んでいない");
         return false;
     }
-    if (s_preroll_fill + n_samples > s_preroll_cap) return false;
-    for (size_t i = 0; i < n_samples; ++i)
-        s_preroll[s_preroll_fill + i] = saan_f32_to_i16(pcm[i]);
-    s_preroll_fill += n_samples;
+    if (s_fill + n_samples > s_cap) {
+        ESP_LOGE(TAG, "発話バッファを超えた（%u + %u > %u sample）。"
+                      "n_frames × SAAN_HOP と pull の合計が合っていない",
+                 (unsigned)s_fill, (unsigned)n_samples, (unsigned)s_cap);
+        return false;
+    }
+    conv_block(pcm, s_buf + s_fill, s_fill, n_samples);
+    s_fill += n_samples;
     return true;
 }
 
 bool saan_speaker_start(void) {
     if (!s_ready) { ESP_LOGE(TAG, "saan_speaker_setup が済んでいない"); return false; }
-    if (s_preroll_fill > 0) {
-        ESP_LOGI(TAG, "貯めた %u sample (%.3f s) を送出", (unsigned)s_preroll_fill,
-                 (double)s_preroll_fill / 22050.0);
-        /* ⚠️ s_preroll は stop() が再生完了を待ってから解放する。playRaw が
-         *    ポインタを持っている間は生きている。 */
-        if (!spk_play(s_preroll, s_preroll_fill)) return false;
-        s_preroll_fill = 0;
+    if (s_started) return true;
+    s_started = true;
+    s_playing = true;
+    ESP_LOGI(TAG, "鳴らし始め: 貯めた %u / %u sample (%.0f%%) / 包絡 max %u",
+             (unsigned)s_fill, (unsigned)s_cap,
+             s_cap ? 100.0 * (double)s_fill / (double)s_cap : 0.0, (unsigned)s_env_max);
+    /* 1 枚目 = 貯めたぶん、2 枚目 = **残り全部（まだ書いていない部分を含む）**。
+     * バッファは追記しかしないので、合成が再生より先を書き続けている限り
+     * （= 先読み量の条件）2 枚目はそのまま正しく鳴る。以後、渡す作業は無い。
+     * ⚠️ 2 枚目を先に渡してしまうと 1 枚目より前に鳴るので順番を守る。 */
+    if (!send_pending()) return false;
+    if (s_sent < s_cap) {
+        if (!M5.Speaker.playRaw(s_buf + s_sent, s_cap - s_sent, 22050, false, 1, SAAN_SPK_CH, false)) {
+            ESP_LOGE(TAG, "M5.Speaker.playRaw（残り区間）が false を返した");
+            return false;
+        }
+        s_sent = s_cap;
     }
     return true;
 }
 
-bool saan_speaker_write_f32(const float *pcm, size_t n_samples) {
-    if (n_samples > (size_t)SAAN_SPK_MAXBUF) {
-        ESP_LOGE(TAG, "チャンクが大きすぎる %u > %d sample",
-                 (unsigned)n_samples, (int)SAAN_SPK_MAXBUF);
-        return false;
-    }
-    /* ⚠️ **変換してから playRaw する。** 生きているポインタは最大 2 本
-     *    （current + next）で、3 枚回しなので今から書く s_ring[s_ring_idx] は
-     *    2 回前に queue したもの = 既に再生済み。 */
-    int16_t *dst = s_ring[s_ring_idx];
-    for (size_t i = 0; i < n_samples; ++i) dst[i] = saan_f32_to_i16(pcm[i]);
-    s_ring_idx = (s_ring_idx + 1) % SAAN_SPK_NBUF;
-
-    return spk_play(dst, n_samples);
+bool saan_speaker_pump(bool final) {
+    (void)final;
+    if (!s_started) return false;
+    /* 渡す作業は start() で済んでいる。ここでは**再生が書き込みを追い越していないか**だけ見る。
+     * 追い越されると、その区間は begin_utterance のゼロ埋め = 無音が鳴る（途切れ）。 */
+    if (M5.Speaker.isPlaying(SAAN_SPK_CH) == 0) return false;
+    int64_t dt = esp_timer_get_time() - s_play_t0_us;
+    if (dt < 0) return false;
+    size_t pos = s_play_base + (size_t)(dt * 22050 / 1000000) + SAAN_SPK_READAHEAD;
+    return pos > s_fill;
 }
 
 void saan_speaker_stop(void) {
-    /* ⚠️ **鳴らし終わるまで待つ。** ここで戻ると、対話モードで次の発話の
-     *    変換がバッファを上書きして**前の発話の尾が化ける**。
-     *    M5.Speaker.end() は呼ばない（次の発話でまた begin する意味が無い）。 */
-    while (M5.Speaker.isPlaying()) {
+    /* ⚠️ **鳴らし終わるまで待つ。** ここで戻ると、次の発話が begin で解放して
+     *    **前の発話の尾が化ける**。M5.Speaker.end() は呼ばない。 */
+    while (M5.Speaker.isPlaying(SAAN_SPK_CH) != 0) {
         vTaskDelay(1);
     }
+    s_playing = false;
     /* ⚠️ **再生が終わってから解放する。** playRaw はポインタを持つだけなので、
      *    先に free すると解放済みメモリを鳴らす（音は出るので気づけない）。 */
-    if (s_preroll != NULL) {
-        heap_caps_free(s_preroll);
-        s_preroll = NULL;
-        s_preroll_cap = 0;
-        s_preroll_fill = 0;
+    if (s_buf != NULL) {
+        heap_caps_free(s_buf);
+        s_buf = NULL;
+        s_cap = 0;
+        s_fill = 0;
+        s_sent = 0;
     }
+    s_started = false;
 }

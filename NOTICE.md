@@ -66,3 +66,11 @@ MOE-Speech (litagin) — https://huggingface.co/spaces/litagin/moe-speech-licens
 ## 4. ESP-IDF（Apache-2.0, Espressif）
 
 - <https://github.com/espressif/esp-idf> v5.5.5
+
+## 5. m5stack-avatar（MIT, Shinya Ishikawa）
+
+- <https://github.com/stack-chan/m5stack-avatar> commit `7a90083`（v0.10.0）
+- Copyright (c) 2018 Shinya Ishikawa — MIT License
+  （全文: [`components/m5stack-avatar/LICENSE.txt`](components/m5stack-avatar/LICENSE.txt)）
+- `components/m5stack-avatar/src/` にコピー。ESP-IDF（Arduino 無し）で通すための差分は
+  [`components/m5stack-avatar/README.md`](components/m5stack-avatar/README.md)

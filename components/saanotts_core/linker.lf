@@ -1,0 +1,13 @@
+# 推論コアの .text を IRAM に置く（-DSAAN_CORE_IRAM=1 のときだけ CMake が渡す）。
+#
+# 目的: flash 上のコードは 32 KB の I-cache 経由で実行される。ホットループが
+#       キャッシュから外れると flash 読み出し待ちになる。IRAM なら待ちが無い。
+# 代償: IRAM は DRAM と同じプール（341,760 B）から取る。コア全体で数十 KB。
+# ⚠️ **速いかどうかは実測で決める**（docs/measurements.md）。
+[mapping:saanotts_core]
+archive: libsaanotts_core.a
+entries:
+    saanotts_int8 (noflash_text)
+    saanotts_stream (noflash_text)
+    saanotts (noflash_text)
+    fft (noflash_text)
