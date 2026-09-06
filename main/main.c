@@ -86,10 +86,12 @@ static const char *TAG = "saanotts";
  * xRT は前の発話で実測した値に余裕（SAAN_XRT_MARGIN）を掛けて使う。最初の発話は
  * SAAN_XRT_INITIAL。さらに 2 チャンクぶん（DMA の先読み + 粒度）を足す。
  * ⚠️ 見込みが甘いと途切れる（`途切れ N 回` に出る）。次の発話で xRT が更新されて直る。
- * ⚠️ 初期値 1.2 は**未測定の見込み**（本家 CoreS3 顔なし 0.446 に、顔の +6% と余裕を乗せた）。
- *    旧コアでは 1.8 だった。実測して外れていたら直すこと（外れても 2 発話目からは実測値）。 */
+ * 初期値 0.6 は実測から（2026-09-07、顔あり既定ビルドで定常 xRT 0.443〜0.445。余裕 35%）。
+ *    1.0 未満なら先読みは 2 チャンクだけになり、発話開始は「初回 pull + 1 チャンク」≒ 330 ms。
+ *    旧コアでは 1.8、同期直後の未測定の見込みは 1.2（1 発話目だけ 475 ms かかっていた）。
+ *    外れても 2 発話目からは実測値で上書きされる。 */
 #ifndef SAAN_XRT_INITIAL
-#define SAAN_XRT_INITIAL 1.2f
+#define SAAN_XRT_INITIAL 0.6f
 #endif
 #ifndef SAAN_XRT_MARGIN
 #define SAAN_XRT_MARGIN 1.15f
@@ -401,9 +403,13 @@ static bool synth_once(const saan_weights *w, const int32_t *ids, int32_t n_ids)
         {
             uint32_t lf = 0, lo = 0; float lm = 0.0f;
             saan_ui_lip_stats(&lf, &lo, &lm);
-            /* ⚠️ lo == 0 なら口が一度も開いていない = リップシンクが効いていない */
-            ESP_LOGI(TAG, "リップシンク: %u フレーム中 %u で口が開いた（最大 %.2f）",
-                     (unsigned)lf, (unsigned)lo, (double)lm);
+            /* ⚠️ 顔あり（-DSAAN_UI=avatar）で lo == 0 なら口が一度も開いていない = リップシンクが
+             *    効いていない。文字表示 UI（-DSAAN_UI=text）は常に 0 を返す。 */
+            if (lf == 0)
+                ESP_LOGI(TAG, "リップシンク: なし（文字表示 UI か、lip_task が回っていない）");
+            else
+                ESP_LOGI(TAG, "リップシンク: %u フレーム中 %u で口が開いた（最大 %.2f）",
+                         (unsigned)lf, (unsigned)lo, (double)lm);
         }
 
         /* 次の発話の先読み量に反映する（2 チャンク以上で測れたときだけ）。

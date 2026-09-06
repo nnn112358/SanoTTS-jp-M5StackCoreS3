@@ -33,8 +33,15 @@ static char s_text[SAAN_UI_TEXT_CHARS * 4 + 4];
 static volatile uint32_t s_lip_frames, s_lip_open;
 static volatile float    s_lip_max;
 
-/* 口の開き = 再生中の音量。saan_speaker が包絡（512 sample ごとの RMS）と
- * 再生位置を持っているので、ここは読んで渡すだけ。 */
+/* リップシンクの更新周期。avatar の drawLoop は 10 ms ごとに描き直す（Avatar.cpp の
+ * TaskDelay(10)）ので、それより粗いとここが上限になる。以前は 33 ms（30 Hz）だった。
+ * 包絡側（saan_speaker.cpp の SAAN_ENV_BLOCK = 256 sample = 11.6 ms）と同じ粒度。 */
+#ifndef SAAN_LIP_PERIOD_MS
+#define SAAN_LIP_PERIOD_MS 10
+#endif
+
+/* 口の開き = 再生中の音量。saan_speaker が包絡（SAAN_ENV_BLOCK sample ごとの RMS を
+ * ブロック間で線形補間）と再生位置を持っているので、ここは読んで渡すだけ。 */
 static void lip_task(void *arg) {
     DriveContext *ctx = reinterpret_cast<DriveContext *>(arg);
     Avatar *av = ctx->getAvatar();
@@ -44,7 +51,7 @@ static void lip_task(void *arg) {
         ++s_lip_frames;
         if (r > 0.1f) ++s_lip_open;
         if (r > s_lip_max) s_lip_max = r;
-        vTaskDelay(pdMS_TO_TICKS(33));
+        vTaskDelay(pdMS_TO_TICKS(SAAN_LIP_PERIOD_MS));
     }
 }
 
@@ -57,8 +64,8 @@ bool saan_ui_init(void) {
     s_avatar.init();   /* drawLoop / facialLoop を core 1 に作る */
     s_avatar.addTask(lip_task, "lipSync", 2048, 2, NULL, APP_CPU_NUM);
     s_ready = true;
-    ESP_LOGI(TAG, "m5stack-avatar 起動（core %d）/ 吹き出し lgfxJapanGothic_16 / リップシンク 33 ms",
-             (int)APP_CPU_NUM);
+    ESP_LOGI(TAG, "m5stack-avatar 起動（core %d）/ 吹き出し lgfxJapanGothic_16 / リップシンク %d ms",
+             (int)APP_CPU_NUM, (int)SAAN_LIP_PERIOD_MS);
     return true;
 }
 

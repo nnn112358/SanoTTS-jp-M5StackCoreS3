@@ -82,6 +82,21 @@ set(SAAN_ENABLE_PIE "${SAAN_ENABLE_PIE}" CACHE INTERNAL "W8A8 + PIE を使うか
 set(COMPONENTS main)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+
+# --- 画面の実装（-DSAAN_UI=avatar|text）を**早期展開にも見せる**-----------------------
+#
+# main/CMakeLists.txt はこの値で REQUIRES（m5stack-avatar を要求するか）を変える。
+# ⚠️ IDF は各コンポーネントの依存を、project() の中の「早期展開」（別プロセスの cmake -P）で
+#    先に集める。そこでは -D のキャッシュ変数が見えないので、普通の変数だと既定の avatar で
+#    REQUIRES が固まり、text でも m5stack-avatar がビルド対象に残る（実際に残った。
+#    project_description.json の main.reqs で確認）。ビルドプロパティは早期展開に渡るので、
+#    ここで載せて main 側は idf_build_get_property で読む。
+if(NOT DEFINED SAAN_UI)
+    set(SAAN_UI "avatar")
+endif()
+set(SAAN_UI "${SAAN_UI}" CACHE STRING "画面の実装: avatar（顔）か text（文字だけ）")
+idf_build_set_property(SAAN_UI "${SAAN_UI}")
+
 project(saanotts_cores3)
 
 # --- 辞書 blob を flash の `dict` パーティションに焼く ----------------------------

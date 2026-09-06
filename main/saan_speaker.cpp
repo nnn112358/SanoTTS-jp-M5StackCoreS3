@@ -43,8 +43,10 @@ static const char *TAG = "saan_spk";
 
 #define SAAN_SPK_CH 0   /* 使う仮想チャンネル */
 
-/* リップシンク包絡の 1 ブロック（sample）。512 = 23.2 ms。lip_task の 33 ms より細かい */
-#define SAAN_ENV_BLOCK 512
+/* リップシンク包絡の 1 ブロック（sample）。256 = 11.6 ms。lip_task の 10 ms と同じ粒度
+ * （以前は 512 = 23.2 ms / lip_task 33 ms）。ブロック間は saan_speaker_level_now() が線形補間する。
+ * 1 発話あたり uint8_t × (sample / 256) なので 10 秒の音声でも 862 B（PSRAM）。 */
+#define SAAN_ENV_BLOCK 256
 
 /* playRaw してから実際に鳴るまでの遅れ（DMA バッファぶん）の見込み。
  * ⚠️ **測っていない。** 2,048 sample = 93 ms の DMA バッファの半分を仮置き。 */
@@ -164,11 +166,18 @@ float saan_speaker_level_now(void) {
     if (pos >= s_fill) return 0.0f;              /* まだ変換していない / 途切れ */
     size_t idx = pos / SAAN_ENV_BLOCK;
     if (idx >= s_env_cap) return 0.0f;
-    uint32_t e = s_env[idx];
+    /* ブロック内の位置で隣のブロックと線形補間する（段差を無くす）。
+     * ⚠️ 次のブロックは**変換が済んでいるときだけ**使う。未変換のところは memset の 0 なので、
+     *    合成が再生に近いときに 0 へ向かって口が閉じてしまう。 */
+    float e = (float)s_env[idx];
+    if (idx + 1 < s_env_cap && (idx + 2) * SAAN_ENV_BLOCK <= s_fill) {
+        float t = (float)(pos - idx * SAAN_ENV_BLOCK) / (float)SAAN_ENV_BLOCK;   /* 0..1 */
+        e = e + t * ((float)s_env[idx + 1] - e);
+    }
     uint32_t m = s_env_max;
     if (m < 32) m = 32;                           /* 無音に近い発話で 0/0 を作らない */
-    if (e < 6) return 0.0f;                       /* 床（RMS < 96）。息の音で口が震えない */
-    float r = (float)e / (float)m;
+    if (e < 6.0f) return 0.0f;                    /* 床（RMS < 96）。息の音で口が震えない */
+    float r = e / (float)m;
     return r > 1.0f ? 1.0f : r;
 }
 

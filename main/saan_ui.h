@@ -1,8 +1,12 @@
-/* 顔（m5stack-avatar）とタッチ。実装は saan_ui.cpp（C++）。
+/* 画面とタッチ。実装は 2 つあり、ビルド時に `-DSAAN_UI=avatar|text` で選ぶ（main/CMakeLists.txt）:
  *
- * 画面全体を m5stack-avatar が描く（自前の描画タスク 2 本、core 1）。
- * 文字は吹き出し（右下）に出す。口の開きは saan_speaker の再生位置の音量に合わせる
- * （リップシンク。saan_ui.cpp の lip_task が 33 ms ごとに saan_speaker_level_now() を読む）。
+ *   saan_ui_avatar.cpp（既定） … m5stack-avatar の顔。画面全体を avatar が描く（自前の描画タスク
+ *       2 本、core 1）。文字は吹き出し（右下）に出す。口の開きは saan_speaker の再生位置の音量に
+ *       合わせる（リップシンク。lip_task が 10 ms ごとに saan_speaker_level_now() を読む）
+ *   saan_ui_text.cpp          … 文字だけ（M5GFX）。上段に文、下段にステータス。リップシンク無し
+ *       （saan_ui_lip_stats は 0 を返す）。m5stack-avatar はリンクされない
+ *
+ * main.c はこのヘッダの API しか使わず、どちらが入っているかを知らない。
  *
  * ⚠️ **M5.begin() の後に呼ぶこと。** M5.begin() は saan_speaker_setup() の中で 1 回だけ呼ぶ。
  * ⚠️ **M5.update()（タッチ）は合成タスクからだけ呼ぶ。** タッチ (FT6336) と

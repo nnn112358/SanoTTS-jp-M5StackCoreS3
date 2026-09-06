@@ -9,3 +9,6 @@ logs/
 
 # 辞書 blob（13.7 MB）。scripts/get_dict.sh で Release から取る
 model/k1-dict-438750.bin
+
+# 実機に焼いた一括 16 MB イメージ（firmware/README.md 参照）。app 等の小さいバイナリは入れる
+firmware/*/m5-cores3-*-16mb.bin

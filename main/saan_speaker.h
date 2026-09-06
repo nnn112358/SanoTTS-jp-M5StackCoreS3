@@ -19,9 +19,10 @@
  *   saan_speaker_pump(true)                 同上（互換のため残してある）
  *   saan_speaker_stop()                     鳴らし終わるまで待ち、バッファを解放
  *
- * リップシンク: 変換のたびに 512 sample（23 ms）ごとの RMS を包絡として貯め、
+ * リップシンク: 変換のたびに 256 sample（11.6 ms）ごとの RMS を包絡として貯め、
  *   鳴らし始めた時刻から「いま鳴っているサンプル位置」を推定して
- *   saan_speaker_level_now() で 0..1 を返す。saan_ui.cpp の lip_task が読む。
+ *   saan_speaker_level_now() で 0..1 を返す（隣のブロックと線形補間）。
+ *   saan_ui_avatar.cpp の lip_task が 10 ms ごとに読む。
  */
 #ifndef SAAN_SPEAKER_H
 #define SAAN_SPEAKER_H

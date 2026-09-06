@@ -39,6 +39,7 @@ cd SanoTTS-jp-M5StackCoreS3
 
 | フラグ | 既定 | 意味 |
 |---|---|---|
+| `-DSAAN_UI=avatar/text` | **avatar** | 画面。avatar = m5stack-avatar の顔 + 吹き出し + リップシンク / text = 文字だけ（文・出典・ステータスの 3 段。avatar はリンクしない） |
 | `-DSAAN_ENABLE_PIE=0/1` | **1** | W8A8 + ESP32-S3 の整数 SIMD (PIE)。0 = W8A32 / 移植可能 C |
 | `-DSAAN_BUFFERED=0/1` | **0** | 0 = xRT から先読み量を決めて計算しながら鳴らす / 1 = 全部貯めてから鳴らす |
 | `-DSAAN_BOOT_SPEAK=0/1` | **1** | 起動時に 1 文喋る |
@@ -47,7 +48,15 @@ cd SanoTTS-jp-M5StackCoreS3
 | `-DSAAN_OJ_PSRAM=0/1` | **1** | Open JTalk の一時ヒープを PSRAM に向ける（0 は陽性対照。内部 DRAM が減るのを見る） |
 | `-DSAAN_PROFILE=0/1` | **0** | 段別プロファイル（CCOUNT）を発話後に出す。**速度の報告には 0 で**（計測にコストがある） |
 
-`-D` の値は `build/` を消すまで CMake キャッシュに残る。
+ビルド環境なしで焼くだけなら、実機確認済みのイメージが [`firmware/`](firmware/README.md) にある
+（一括 16 MB イメージを `esptool.py write_flash 0x0 …` で焼く）。
+
+`-D` の値は `build/` を消すまで CMake キャッシュに残る。顔と文字表示を行き来するなら build ディレクトリを分ける:
+
+```sh
+./idf.sh -p /dev/ttyACM0 flash monitor                                                # 顔（既定、build/）
+./idf.sh -B build_text -DSDKCONFIG=build_text/sdkconfig -DSAAN_UI=text -p /dev/ttyACM0 flash monitor   # 文字だけ
+```
 
 ### M5Stack Tab5（ESP32-P4）
 
@@ -64,9 +73,10 @@ CoreS3 は native USB なので `/dev/ttyACM0`（権限が無ければ
 入力も本家に合わせて **1 経路**になった: `saan_g2p_classify()` が「かな中間表現 / 漢字かな交じり文 /
 拒否」を決めるので、前置記号は要らない（`=` でかな、`!` で辞書に**強制**する試験用の経路は残してある）。
 
-⚠️ **この同期後の実機測定はまだ**（ビルドが通ることだけ確認。実測は [`docs/measurements.md`](docs/measurements.md) の
-「2026-09-04 コア同期」節に追記する）。見込み: xRT < 1 なので先読みは 2 チャンク（186 ms）で足り、
-発話開始は「初回 pull + 1 チャンク」≒ 0.3〜0.4 s になるはず。
+2026-09-07 にこの板で実測した（[`docs/measurements.md`](docs/measurements.md)）: **顔ありの既定ビルドで
+定常 xRT 0.445 / 追い越し 0 / checksum `0xa69a7ebbb5ccb05f`（本家 QEMU・本家 M5 実機と一致）**。
+先読みは 2 チャンク（186 ms）で足り、**発話開始まで 330 ms**（旧コアは 1.8 s）。
+本家 Release v0.3.0 の CoreS3 イメージ（顔なし）も同じ板で 0.448 を再現している。
 ⚠️ **checksum の期待値が変わった**（S3 = GELU の erf 近似）: W8A8+PIE **`0xa69a7ebbb5ccb05f`** /
 W8A32 `0xe4b645c30835d42d`。旧コアの `0x04de91103a0e49f9` とは一致しない。
 ⚠️ **blob は v2**（654,032 B）。v0.2.0 以前の `saanotts-jp-v3-int8.bin`（v1、643,936 B）はコアが

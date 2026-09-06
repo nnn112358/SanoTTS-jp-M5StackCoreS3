@@ -92,7 +92,8 @@ CONFIG_RINGBUF_PLACE_ISR_FUNCTIONS_INTO_FLASH=y
 #    **esp_mmu_map**（component esp_mm。ROM 実装と無関係で上限に当たらない）に切り替える。
 #    本家が CoreS3 で同じ組み合わせ（ROM_IMPL=y + esp_mmu_map + PSRAM 8 MB + 辞書）で
 #    動かしている（M-90: 連続 vaddr 23.7 MB 空き）ので、内部 DRAM を約 9 KB 空けるために y にした。
-#    ⚠️ **このリポジトリの実機では未確認**（2026-09-04 時点）。辞書が開けなくなったら n に戻す
-#    （そのとき saan_dict.c は従来の esp_partition_mmap 経路になる）。
+#    ✅ 2026-09-07、本家 Release v0.3.0 の M5 イメージ（同じ組み合わせ）をこの CoreS3 で焼いて
+#    `esp_mmu_map OK`（連続空き 23,724,032 B）と `辞書 OK` を確認（docs/measurements.md）。
+#    辞書が開けなくなったら n に戻す（そのとき saan_dict.c は従来の esp_partition_mmap 経路になる）。
 CONFIG_SPI_FLASH_ROM_IMPL=y
 CONFIG_SPI_MASTER_ISR_IN_IRAM=n

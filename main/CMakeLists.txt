@@ -16,15 +16,49 @@ if(SAAN_KANJI)
     set(SAAN_MAIN_K "saan_dict.c" "saan_kanji.c")
 endif()
 
+# --- 画面の実装を選ぶ（**書き込み時に切り替える**）------------------------------
+#
+#     ./idf.sh -DSAAN_UI=avatar build flash    顔（m5stack-avatar）+ 吹き出し + リップシンク（既定）
+#     ./idf.sh -DSAAN_UI=text   build flash    文字だけ（M5GFX。文 / 出典 / ステータスの 3 段）
+#
+# どちらも main/saan_ui.h の同じ API を実装する（main.c は違いを知らない）。
+# text では m5stack-avatar コンポーネントを REQUIRES から外す。IDF は components/ にある
+# コンポーネントをコンパイルはするが、誰も要求しないのでイメージにはオブジェクトが 1 つも
+# 入らない（build_text の .map で `libm5stack-avatar.a(` が 0 件、顔ビルドは 935 件。実測）。
+# 描画タスク 2 本 + リップシンクタスクも無い。
+# ⚠️ **CMake のキャッシュに残る。** 一度 -D で渡した値は build/ を消すまで有効。
+#    2 種類を行き来するなら build ディレクトリを分けるのが楽:
+#     ./idf.sh -B build_text -DSDKCONFIG=build_text/sdkconfig -DSAAN_UI=text build flash
+# ⚠️ 値はビルドプロパティから読む（トップの CMakeLists.txt が -D の値を idf_build_set_property で
+#    載せている）。早期展開ではキャッシュ変数 SAAN_UI が見えないため、ここで `if(NOT DEFINED SAAN_UI)`
+#    と既定を決めると text を渡しても REQUIRES が avatar で固まる（実際に踏んだ）。
+idf_build_get_property(_saan_ui_prop SAAN_UI)
+if(_saan_ui_prop)
+    set(SAAN_UI "${_saan_ui_prop}")
+elseif(NOT DEFINED SAAN_UI)
+    set(SAAN_UI "avatar")
+endif()
+if(SAAN_UI STREQUAL "avatar")
+    set(SAAN_UI_SRC "saan_ui_avatar.cpp")
+    set(SAAN_UI_REQ m5stack-avatar)
+    message(STATUS "sanoTTS: 画面 = **顔**（m5stack-avatar + リップシンク）— 文字だけなら -DSAAN_UI=text")
+elseif(SAAN_UI STREQUAL "text")
+    set(SAAN_UI_SRC "saan_ui_text.cpp")
+    set(SAAN_UI_REQ "")
+    message(STATUS "sanoTTS: 画面 = **文字表示**（M5GFX のみ。m5stack-avatar はリンクしない）— 顔なら -DSAAN_UI=avatar")
+else()
+    message(FATAL_ERROR "SAAN_UI=${SAAN_UI} は不明。avatar か text を渡すこと")
+endif()
+
 idf_component_register(
     SRCS "main.c"
          "saan_model.c"
          "saan_console.c"
          "saan_speaker.cpp"
-         "saan_ui.cpp"
+         ${SAAN_UI_SRC}
          ${SAAN_MAIN_K}
     INCLUDE_DIRS "."
-    REQUIRES saanotts_core m5stack-avatar esp_timer esp_driver_usb_serial_jtag esp_driver_uart esp_mm esp_partition
+    REQUIRES saanotts_core ${SAAN_UI_REQ} esp_timer esp_driver_usb_serial_jtag esp_driver_uart esp_mm esp_partition
 )
 
 # --- 重み blob → `const` 配列のヘッダ ---------------------------------------

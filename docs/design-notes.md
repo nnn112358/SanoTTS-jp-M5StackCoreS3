@@ -19,7 +19,9 @@ main/
   main.c                    起動 → セルフテスト → 表示 → 発話 → 入力/タッチのループ（経路判定は speak_auto）
   saan_model.{c,h}          .rodata の重み blob を開く（v2 でないと SAAN_ERR_VERSION）
   saan_speaker.{h,cpp}      M5.Speaker 出力（22.05 kHz 直接。先読み自動 / 貯めて再生。PCM 統計もここ）
-  saan_ui.{h,cpp}           顔（m5stack-avatar）とタッチ、リップシンク
+  saan_ui.h                 画面とタッチの API（実装は -DSAAN_UI=avatar|text で選ぶ）
+  saan_ui_avatar.cpp        顔（m5stack-avatar）+ 吹き出し + リップシンク（既定）
+  saan_ui_text.cpp          文字だけ（M5GFX。文 / 出典 / ステータス。avatar をリンクしない）
   saan_console.{c,h}        シリアル `かな> ` 入力（タイムアウト付き poll。本家のコピー）
   saan_dict.{c,h}           辞書パーティションを貼る（本家のコピー。ROM_IMPL=y なら esp_mmu_map）
   saan_kanji.{c,h}          漢字文 → 音素 ID（本家のコピー。作業領域は合成 arena を借りる）
@@ -80,7 +82,7 @@ NOTICE.md  LICENSES/        帰属表示とライセンス全文
 | 事象 | 対処 |
 |---|---|
 | `.dram0.bss` が 10,096 B 溢れてリンクできない | 音声バッファ 28,672 B を static からヒープ確保（PSRAM 優先）に。IRAM のコードを flash へ（`FREERTOS/HEAP/RINGBUF_PLACE_*_INTO_FLASH`, `SPI_FLASH_ROM_IMPL`, `SPI_MASTER_ISR_IN_IRAM=n`）。`set(COMPONENTS main)` で不要なコンポーネントを外す |
-| `esp_partition_mmap` が `ESP_ERR_NO_MEM`（3 MB でも 1 MB でも） | **真因は `CONFIG_SPI_FLASH_ROM_IMPL=y`**（IDF の mmap がコンパイルから外れ、ROM の実装 `0x40000bac` に差し替わり、IDF がそれに渡すプールは 128 ページ = 8 MB。`flash_mmap.c:53`）。当時は PSRAM の vaddr と誤診して重みをヘッダ化した（設計としては正しいので残す）。一度 `ROM_IMPL=n` にして 13.7 MB の辞書 mmap を通したが、**2026-09-04 に `y` へ戻した**: 本家の `saan_dict.c` が `ROM_IMPL=y` のとき `esp_mmu_map`（component `esp_mm`。ROM 実装と無関係で上限に当たらない）に自動で切り替えるようになり、本家が CoreS3 の同じ組み合わせで動かしている（M-90）。内部 DRAM が約 9 KB 空く。⚠️ このリポジトリの実機では未確認 |
+| `esp_partition_mmap` が `ESP_ERR_NO_MEM`（3 MB でも 1 MB でも） | **真因は `CONFIG_SPI_FLASH_ROM_IMPL=y`**（IDF の mmap がコンパイルから外れ、ROM の実装 `0x40000bac` に差し替わり、IDF がそれに渡すプールは 128 ページ = 8 MB。`flash_mmap.c:53`）。当時は PSRAM の vaddr と誤診して重みをヘッダ化した（設計としては正しいので残す）。一度 `ROM_IMPL=n` にして 13.7 MB の辞書 mmap を通したが、**2026-09-04 に `y` へ戻した**: 本家の `saan_dict.c` が `ROM_IMPL=y` のとき `esp_mmu_map`（component `esp_mm`。ROM 実装と無関係で上限に当たらない）に自動で切り替えるようになり、本家が CoreS3 の同じ組み合わせで動かしている（M-90）。内部 DRAM が約 9 KB 空く。✅ 2026-09-07 に本家 v0.3.0 の M5 イメージをこの板で焼き、`esp_mmu_map OK` / `辞書 OK` を確認（docs/measurements.md） |
 | S3 のキャッシュ設定と DRAM | `dram0_0_seg` は 341,760 B 固定で、D-cache を 64 KB にしても減らない（64+32 KB と 32+32 KB で overflow が同じ 10,096 B）。無料なので 64 KB |
 | M5 の 22.05 → 44.1 kHz リサンプル | `SAAN_SPK_OUT_RATE 22050`。AW88298 は 22.05 kHz 対応で、M5Unified が `rate_tbl` からレジスタ 0x06 (I2SSR) を設定する（M5Unified.cpp 566–581 行。CoreS3 の既定値も 22050） |
 | `M5.Speaker.playRaw` はデータをコピーしない | 再生が終わるまでバッファを触らない。ストリーミングは 3 枚回し（キューは 2 枚）、貯める方式は `stop()` で再生完了を待ってから解放 |
@@ -105,13 +107,16 @@ xRT = 1.55 なら音声の **35.5%** を先に貯めれば以後は追い越さ�
 
 ## 顔とリップシンク（m5stack-avatar）
 
-画面は [m5stack-avatar](https://github.com/stack-chan/m5stack-avatar)（`components/m5stack-avatar/`、
+画面の実装は 2 つあり、**ビルド（書き込み）時に `-DSAAN_UI=avatar|text` で選ぶ**（`main/CMakeLists.txt`）。
+既定の `avatar` は [m5stack-avatar](https://github.com/stack-chan/m5stack-avatar)（`components/m5stack-avatar/`、
 MIT、v0.10.0 を vendored）が描く。文は吹き出し（右下）に出す。
+`text` は `saan_ui_text.cpp`（M5GFX だけ。上段に文、下段にステータス、中段に出典）で、avatar コンポーネントを
+REQUIRES から外すので描画タスクもリップシンクも無く、合成タスクからだけ描く。以下は `avatar` の話。
 
 ```
-合成タスク (core 0, 優先度 1)            avatar drawLoop / facialLoop / lip_task (core 1)
-  saan_stream_pull → f32                      33 ms ごと:
-  → conv_block(): int16 化 + 512 sample ごとの   r = saan_speaker_level_now()
+合成タスク (core 0, 優先度 1)            avatar drawLoop (10 ms) / facialLoop (33 ms) / lip_task (core 1)
+  saan_stream_pull → f32                      10 ms ごと:
+  → conv_block(): int16 化 + 256 sample ごとの   r = saan_speaker_level_now()
     RMS を包絡 s_env[] に書く（PSRAM）           avatar.setMouthOpenRatio(r)
   → playRaw（開始時刻 s_play_t0 を記録）
 ```
@@ -119,6 +124,10 @@ MIT、v0.10.0 を vendored）が描く。文は吹き出し（右下）に出す
 - **口の開き = いま鳴っているサンプル位置の RMS ÷ その発話の最大 RMS**（0..1）。
   再生位置は「鳴らし始めた時刻 + 経過時間 − DMA 遅れ 45 ms（仮置き）」で推定する。
   RMS の床（RMS < 96）は 0 にして息の音で口が震えないようにした
+- 更新頻度（2026-09-07 に上げた）: lip_task 33 → **10 ms**（avatar の drawLoop と同じ）、包絡 512 →
+  **256 sample**（11.6 ms）、隣のブロックとの**線形補間**で段差を消した。次のブロックは変換済みの
+  ときだけ使う（未変換は 0 なので、合成が再生に近いと口が閉じてしまう）。
+  CPU は core 1 で sqrtf が 256 sample に 1 回増えるだけ。`SAAN_LIP_PERIOD_MS` で変えられる
 - 包絡は変換のたびに書くので、貯めてから鳴らす方式（既定）では**再生前に発話全体の包絡が
   揃っている**。ストリーミングでは途切れた瞬間に `isPlaying()` が false → 口を閉じ、
   次のチャンクを送るときに時刻を取り直す（正確なのは貯める方式）
