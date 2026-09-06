@@ -32,9 +32,17 @@ bool saan_model_open(saan_weights *w) {
 
     saan_status s = saan_weights_open(w, ptr, SAAN_MODEL_BLOB_BYTES);
     if (s != SAAN_OK) {
-        ESP_LOGE(TAG, "saan_weights_open: %s (ヘッダの中身が blob でない)", saan_strerror(s));
+        if (s == SAAN_ERR_VERSION)
+            /* ⚠️ 2026-09-02 の S4 以降のコアは **blob v2**（654,032 B）しか開けない。
+             *    v1（643,936 B。Release v0.2.0 以前の saanotts-jp-v3-int8.bin）はここで止まる。 */
+            ESP_LOGE(TAG, "saan_weights_open: %s — blob が形式 v1。Release v0.3.0 以降の "
+                          "saanotts-jp-v3-int8.bin（v2、654,032 B）を model/student_i8.bin に置くこと",
+                     saan_strerror(s));
+        else
+            ESP_LOGE(TAG, "saan_weights_open: %s (ヘッダの中身が blob でない)", saan_strerror(s));
         return false;
     }
-    ESP_LOGI(TAG, "重み OK: %" PRIu32 " tensors / base %p", w->n_tensors, (const void *)w->base);
+    ESP_LOGI(TAG, "重み OK: %" PRIu32 " tensors / 形式 v%" PRIu32 " / base %p",
+             w->n_tensors, w->version, (const void *)w->base);
     return true;
 }

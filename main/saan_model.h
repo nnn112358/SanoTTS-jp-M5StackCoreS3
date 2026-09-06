@@ -4,9 +4,11 @@
  * Release の saanotts-jp-v3-int8.bin）。ライセンスは MIT ではなく
  * sanoTTS-jp Model License 1.0 — LICENSES/ と NOTICE.md を読むこと。
  *
- * **SRAM にコピーしない。** 643,936 B は ESP32-S3 の内部 SRAM 512 KB に入らない。
+ * **SRAM にコピーしない。** 654,032 B（blob v2）は ESP32-S3 の内部 SRAM 512 KB に入らない。
  * ビルド時に scripts/blob_to_header.py が `const uint8_t[]` のヘッダにして
  * app の .rodata（flash）に埋め、そのまま読む（コアは blob を書き換えない）。
+ * ⚠️ **blob は v2 形式**（int8 conv 重みが [cout][k][align16(cin)]。Release v0.3.0 以降）。
+ *    v1（643,936 B）は saan_weights_open が SAAN_ERR_VERSION で拒む。
  */
 #ifndef SAAN_MODEL_H
 #define SAAN_MODEL_H

@@ -4,12 +4,15 @@
  *       CoreS3 向けに改変したもの。モデルも同リポジトリの v3 int8（NOTICE.md）。
  *
  * 流れ:
- *   .rodata の重み blob を開く（saan_model.c）
+ *   .rodata の重み blob を開く（saan_model.c。**blob v2** = 654,032 B。v1 は SAAN_ERR_VERSION）
  *     → スピーカー（M5.Speaker）と顔（m5stack-avatar）を初期化
  *     → **起動セルフテスト**: 組み込みのかな中間表現を saan_g2p() に通し、
  *        demo_ids.h の錨と ids が完全一致するか（**表と実装のずれの検出**）
  *     → 1 回喋る（本家 QEMU の記録値と checksum を突き合わせる基準）
- *     → **ループ**: シリアルの `かな> ` に 1 行入れば合成、画面をタッチすれば直前の列を再合成
+ *     → **ループ**: シリアルの `かな> ` に 1 行入れば合成、画面をタッチすれば直前の列を再合成。
+ *        行が「かな中間表現」か「漢字かな交じり文」かは saan_g2p_classify() が決める
+ *        （本家 K-B。前置記号は要らない。判定は**かな G2P のトークナイザが行末まで通るか**
+ *        そのもので、手書きの文字集合ではない）。`=` でかな、`!` で辞書に**強制**できる（試験用）。
  *
  * 1 発話の中身（synth_once）:
  *   静的 arena で saan_stream_init
@@ -18,12 +21,15 @@
  *        M5 のキューに空きがあるたびに続きの区間を渡す（**計算しながら鳴らす**）
  *     → 統計（xRT / 途切れ / checksum）をログに出し、次の発話の先読み量に xRT を反映
  *
- * ⚠️ **実機（CoreS3 / 240 MHz）の実測は W8A8+PIE で定常 1.55x RT**（docs/measurements.md）。
- *    合成は再生より遅いので、**途切れない条件は「音声の (1 − 1/xRT) を先に貯める」**。
- *    xRT 1.55 なら 35.5%。全部貯めるより発話開始が早い（1.2 秒の文で 2.7 s → 約 1.3 s）。
+ * ⚠️ **速度の現在地（2026-09-04 に本家 origin/main のコアへ同期）。**
+ *    旧コア（2026-09-01 時点）は CoreS3 実機で W8A8+PIE 定常 1.55x RT だった（docs/measurements.md）。
+ *    本家はその後 S1〜S5b / T1〜T5 で **CoreS3（顔なし）定常 xRT 0.446**（本家 M-90）まで詰めた。
+ *    **このリポジトリ（顔あり）での再測定はまだ**。xRT < 1 なら先読みは 2 チャンクで済み、
+ *    途切れない条件「音声の (1 − 1/xRT) を先に貯める」は自動的に 0 になる。
  */
 #include <inttypes.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "esp_heap_caps.h"
@@ -35,6 +41,7 @@
 
 #include "saanotts.h"
 #include "saanotts_stream.h"
+#include "saan_prof.h"
 
 #include "g2p.h"
 
@@ -78,9 +85,11 @@ static const char *TAG = "saanotts";
  *
  * xRT は前の発話で実測した値に余裕（SAAN_XRT_MARGIN）を掛けて使う。最初の発話は
  * SAAN_XRT_INITIAL。さらに 2 チャンクぶん（DMA の先読み + 粒度）を足す。
- * ⚠️ 見込みが甘いと途切れる（`途切れ N 回` に出る）。次の発話で xRT が更新されて直る。 */
+ * ⚠️ 見込みが甘いと途切れる（`途切れ N 回` に出る）。次の発話で xRT が更新されて直る。
+ * ⚠️ 初期値 1.2 は**未測定の見込み**（本家 CoreS3 顔なし 0.446 に、顔の +6% と余裕を乗せた）。
+ *    旧コアでは 1.8 だった。実測して外れていたら直すこと（外れても 2 発話目からは実測値）。 */
 #ifndef SAAN_XRT_INITIAL
-#define SAAN_XRT_INITIAL 1.8f
+#define SAAN_XRT_INITIAL 1.2f
 #endif
 #ifndef SAAN_XRT_MARGIN
 #define SAAN_XRT_MARGIN 1.15f
@@ -102,30 +111,45 @@ static size_t preroll_target(size_t total) {
 /* --- arena ---------------------------------------------------------------
  *
  * ⚠️ **`saan_stream_arena_needed()` の戻り値を使わないこと。** あれは緩い上限で、
- *    n_ids=350 に対し 340,016 B (332 KB) を返す。内部 SRAM に対して大きすぎる。
+ *    n_ids=350 に対し 302,816 B (296 KB) を返す（T4 後のホスト値）。内部 SRAM に対して大きすぎる。
+ * ⚠️ **高水位（`st.peak_used`）もそのまま確保量にしないこと。** init が通る最小 arena は
+ *    ALIGN16 の切り上げと確保順の差で高水位をわずかに上回る。
  *
- * 208 KB (212,992 B) の根拠は本家の実測（`make -C csrc arena`）:
- *   - n_ids=350（学習分布の上限に相当）の最小 arena  197,632 B
- *   - 208 KB 固定で n_ids 1〜520 は init も pull も成功、560 以上は
- *     SAAN_ERR_ARENA で**きれいに失敗**（n_ids 1〜1000 の 23 点でクラッシュ 0）
- *   - CoreS3 実測: used 194,848 B（53 ids）
+ * 176 KB (180,224 B) の根拠は本家の実測（`make -C csrc arena`、T4 後、2026-09-03）:
+ *   - n_ids=350（学習分布の上限に相当）で init も pull も通る最小 arena  160,768 B
+ *   - 176 KB 固定で通った最大 n_ids 450、最初に clean fail するのは 496（SAAN_ERR_ARENA。
+ *     1000 まで**クラッシュ 0 件**）
+ *   - 本家 CoreS3 実測（M-89、53 ids）: used 157,360 B
+ *   履歴: 2026-09-04 の同期前は 208 KB（212,992 B。旧コアの CoreS3 実測 used 194,848 B）。
+ *   T2（ストリーミングで有効範囲だけ計算）と T4（cdel 6 本 → リング 1 本、iSTFT の re/im/frm を
+ *   w_e と共用）で a.used が 177,536 → 160,224 B（350 ids、ホスト）になったので下げた。
+ *   CoreS3 では内部 DRAM の空きが 32 KB 増える（顔 + 辞書を積んだこの構成で一番苦しかったところ）。
  *
  * ⚠️ **PSRAM に置かない。** 合成の作業領域なので速度に直結する。 */
-#define SAAN_ARENA_BYTES (208 * 1024)
+#define SAAN_ARENA_BYTES (176 * 1024)
 
-/* ⚠️ **黙って確保に失敗したのを検出するための下限。**
+/* ⚠️ **黙って確保に失敗したのを検出する二重防御**（init 後の `a.used` の検査）。
  *
- * `saan_alloc` は失敗しても `used` を進めずに NULL を返す。`saan_stream_init` は
- * 25 回の確保のうち各グループの**最後の 1 個しか NULL 検査していない**ので、
- * 途中の大きい確保だけが落ちると **init が SAAN_OK を返したまま壊れた状態**になり、
- * その後 `saan_stream_pull` の中で NULL 書き込み = StoreProhibited で**ログも出ずに再起動**。
- *
- * 本家の実測（n_ids=350）:
- *   正しく init できたときの `a.used`  194,640 B (n_ids=1) 〜 198,768 B (n_ids=520)
- *   黙って失敗したときの `a.used`      最大 191,280 B
- * → 191,280 < 閾値 <= 194,640 なら誤検知も見逃しも無い。中点を採る。
- * ⚠️ **コアの確保順が変わったら再測すること。** */
-#define SAAN_ARENA_USED_FLOOR 192960u
+ * `saan_alloc` は失敗しても `used` を進めずに NULL を返す。かつて `saan_stream_init` は
+ * 各グループの**最後の 1 個しか NULL 検査していなかった**ので、途中の大きい確保だけが
+ * 落ちると **init が SAAN_OK を返したまま壊れた状態**になり、`saan_stream_pull` の中で
+ * NULL 書き込み = StoreProhibited で**ログも出ずに再起動**した。
+ * 今は saan_arena の粘着フラグ `failed` で「黙って失敗」は起きないが、保険として init 後の
+ * `a.used` を**コアが同じ確保一覧から計算する期待値 `saan_stream_arena_used(n_ids)`** と
+ * 突き合わせる（synth_once）。
+ * ⚠️ 以前はここに定数 SAAN_ARENA_USED_FLOOR 192960u があった（ホストで測った中点）。
+ *    `sizeof(struct saan_stream_impl)` がポインタ幅で変わる（ホスト 64 bit / Xtensa 32 bit で
+ *    768 B 違う）ので**ホストで測った定数はターゲットの a.used と一致しない**。本家が
+ *    各ターゲットで自分の sizeof から計算する関数にしたので、それに追随した。 */
+
+#if SAAN_KANJI
+/* 漢字経路（saan_kanji.c）は G2P の間この arena を借りる。**その作業領域（Viterbi 48 KB +
+ * 固定長の配列 + T10(a) で .bss から移した label_ids のトークン表 10,240 B）が収まること**を
+ * コンパイル時に検査する。C99 には _Static_assert が無いので配列の typedef で潰す
+ * （落ちると「負のサイズの配列」でコンパイルが止まる）。 */
+typedef char saan_arena_holds_kanji_workbytes[
+    (SAAN_ARENA_BYTES >= SAAN_KANJI_WORKBYTES) ? 1 : -1];
+#endif
 
 /* 受け付ける ids の上限。**arena の限界 (520) ではなく学習分布の上限を採る。**
  * arena は 520 ids まで持つが、生徒が学習したのは max_spec_length=700（= 350 ids 相当）
@@ -159,8 +183,8 @@ static int32_t g_ids[SAAN_G2P_IDS_CAP];
 #if SAAN_KANJI
 /* 端末内漢字 G2P の辞書（flash に mmap したまま使う。RAM には読まない）。
  * ⚠️ **Viterbi は合成用の g_arena を borrow する。** G2P と合成は同時に走らない。 */
-static k1_dict_t g_dict;
-static bool      g_dict_ok;
+static jdict_t g_dict;
+static bool    g_dict_ok;
 #endif
 
 static int32_t g_last_n_ids;
@@ -201,12 +225,55 @@ static void log_heap(const char *when) {
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 }
 
+/* --- 段別プロファイラ（-DSAAN_PROFILE=1 のときだけ。components/saanotts_core/saan_prof.h）---
+ *
+ * 時計は CCOUNT（CPU サイクル。240 MHz なら 1 サイクル = 4.17 ns）。コアは saan_prof_now() を
+ * 呼ぶだけで、時計の実装はプラットフォーム側（ここ）が出す。
+ * ⚠️ **計測自体のコスト**: 区間の出入りで CCOUNT を読む関数を呼ぶ。`hout` は出力チャネル
+ *    1,539 本なので WCOPY / MAC の区間は 1 チャンクに約 3,000 回入る。細かい区間ほど過大に出る。
+ *    速度の報告には SAAN_PROFILE=0 のビルドを使うこと。 */
+#if SAAN_PROFILE
+#include "esp_cpu.h"
+uint32_t saan_prof_now(void) { return esp_cpu_get_cycle_count(); }
+
+static void prof_report(void) {
+    const uint32_t steps = saan_prof_cnt[SAAN_PROF_STEP];
+    if (steps == 0) return;
+    const double step = (double)saan_prof_acc[SAAN_PROF_STEP] / (double)steps;
+    ESP_LOGI(TAG, "----- 段別プロファイル（step_chunk %u 回の平均。単位 = CCOUNT）-----", (unsigned)steps);
+    ESP_LOGI(TAG, "%-8s %10s %12s %7s %12s %10s", "区間", "回数/step", "cyc/step", "%%STEP", "要素/step", "cyc/要素");
+    for (int id = 0; id < SAAN_PROF_N; ++id) {
+        if (id == SAAN_PROF_INIT || id == SAAN_PROF_LOOKUP) continue;   /* 発話側に出す（下） */
+        const double cnt = (double)saan_prof_cnt[id] / steps;
+        const double acc = (double)saan_prof_acc[id] / steps;
+        const double n   = (double)saan_prof_n[id] / steps;
+        ESP_LOGI(TAG, "%-8s %10.2f %12.0f %6.1f%% %12.0f %10.2f", saan_prof_name(id), cnt, acc,
+                 step > 0 ? 100.0 * acc / step : 0.0, n,
+                 saan_prof_n[id] ? (double)saan_prof_acc[id] / (double)saan_prof_n[id] : 0.0);
+    }
+    /* ⚠️ DW 行には入れ子の QUANT（dw 入力の量子化）が含まれる。カーネル行の合算は二重計上 */
+    ESP_LOGI(TAG, "  ⚠️ DW の cyc/step は入れ子の QUANT を含む。カーネル行の合算は二重計上");
+    /* ⚠️ LOOKUP は S1 で init 側に移った（pull の中では 0 回が期待値） */
+    ESP_LOGI(TAG, "----- INIT 側（発話あたり。step で割らない）-----");
+    ESP_LOGI(TAG, "INIT  : %.0f cyc / 回 (%u 回)", saan_prof_cnt[SAAN_PROF_INIT]
+             ? (double)saan_prof_acc[SAAN_PROF_INIT] / saan_prof_cnt[SAAN_PROF_INIT] : 0.0,
+             (unsigned)saan_prof_cnt[SAAN_PROF_INIT]);
+    ESP_LOGI(TAG, "LOOKUP: %u 回 / %llu cyc（init の resolve_weights。pull の中では 0 回が期待値）",
+             (unsigned)saan_prof_cnt[SAAN_PROF_LOOKUP],
+             (unsigned long long)saan_prof_acc[SAAN_PROF_LOOKUP]);
+    ESP_LOGI(TAG, "1 step = %.0f cyc（240 MHz なら %.2f ms）", step, step / 240000.0);
+}
+#endif
+
 /* --- 1 発話 ---------------------------------------------------------------
  *
  * ⚠️ **arena も PCM 統計も発話ごとに巻き戻す。** 巻き戻さないと 2 発話目の
  *    checksum が「1 + 2 発話目」になり、しかも値は出るので気づけない。 */
 static bool synth_once(const saan_weights *w, const int32_t *ids, int32_t n_ids) {
     saan_pcm_reset();
+#if SAAN_PROFILE
+    saan_prof_reset();
+#endif
     saan_ui_thinking();
     const int64_t t_begin = esp_timer_get_time();
 
@@ -222,13 +289,18 @@ static bool synth_once(const saan_weights *w, const int32_t *ids, int32_t n_ids)
         return false;
     }
 
-    /* 二重防御（SAAN_ARENA_USED_FLOOR の ⚠️）。init が OK でも黙って確保に失敗していることがある */
-    if (a.used < SAAN_ARENA_USED_FLOOR) {
-        ESP_LOGE(TAG, "saan_stream_init は OK を返したが a.used が %u B しかない "
-                      "(下限 %u B)。**確保が黙って失敗している** — "
-                      "このまま pull すると NULL 書き込みで再起動する",
-                 (unsigned)a.used, (unsigned)SAAN_ARENA_USED_FLOOR);
-        return false;
+    /* 二重防御（上の ⚠️）。init が OK でも黙って確保に失敗していることがある。
+     * 期待値はコアが同じ確保一覧から計算する（ポインタ幅の差もターゲット側の sizeof で吸収） */
+    {
+        const size_t used_expect = saan_stream_arena_used(n_ids);
+        if (a.used != used_expect) {
+            ESP_LOGE(TAG, "saan_stream_init は OK を返したが a.used が %u B（期待 %u B）。"
+                          "**確保が黙って失敗しているか、コアの確保一覧と "
+                          "saan_stream_arena_used() がずれている** — "
+                          "このまま pull すると NULL 書き込みで再起動しうる",
+                     (unsigned)a.used, (unsigned)used_expect);
+            return false;
+        }
     }
 
     const size_t total = (size_t)st.n_frames * SAAN_HOP;
@@ -254,8 +326,9 @@ static bool synth_once(const saan_weights *w, const int32_t *ids, int32_t n_ids)
     bool ok = true;
 
     /* --- 合成しながら鳴らす -----------------------------------------------
-     * ⚠️ 最初の pull だけ定常の約 5 倍かかる（CoreS3 実測 766 ms vs 144 ms。受容野
-     *    38 フレームの warmup で内部の step_chunk が複数回走るため）。 */
+     * ⚠️ 最初の pull だけ定常の約 6 倍かかる（旧コアの CoreS3 実測 766 ms vs 144 ms、
+     *    本家新コアの CoreS3 実測 244.65 ms vs 41.47 ms。受容野 38 フレームの warmup で
+     *    内部の step_chunk が複数回走るため）。先読み量の判定より前なので発話開始を遅らせるだけ。 */
     for (;;) {
         int64_t t0 = esp_timer_get_time();
         s = saan_stream_pull(&st, g_chunk, &n);
@@ -295,19 +368,29 @@ static bool synth_once(const saan_weights *w, const int32_t *ids, int32_t n_ids)
         const double mean_rest = chunks > 1 ? (double)t_rest / (chunks - 1) / 1000.0 : 0.0;
         const double chunk_ms = (double)SAAN_CHUNK * SAAN_HOP * 1000.0 / SAAN_SR;
         const double xrt = chunk_ms > 0 ? mean_rest / chunk_ms : 0.0;
+        const double total_ms = (double)(t_first + t_rest) / 1000.0;
         ESP_LOGI(TAG, "----- 結果 -----");
         ESP_LOGI(TAG, "pull %d 回 / %d frames / 音声 %.3f s（端数チャンク %d 回）",
                  chunks, (int)total_frames, total_audio, short_pulls);
         ESP_LOGI(TAG, "初回 pull %.2f ms / 2 回目以降 mean %.2f ms "
                       "(満チャンク 1 個 = %.2f ms の音声)",
                  (double)t_first / 1000.0, mean_rest, chunk_ms);
+        /* ⚠️ この「定常 xRT」は 2 回目以降の全 pull の平均（末尾の端数 pull 込み）。本家 T1 以降の
+         *    定義（満チャンク pull の中央値）とは違い、少し大きめに出る。先読み量の見込みには
+         *    大きめのほうが安全なのでこのまま。**版どうしを比べるなら次の「合成合計 / 音声」**
+         *    （定義に依らない量）を見ること。 */
         ESP_LOGI(TAG, "定常 xRT = %.3f  ← **1.0 を超えたら再生より遅い**", xrt);
+        ESP_LOGI(TAG, "合成合計 %.2f ms（全 pull の dt の和）/ 音声 %.3f s → 合成/音声 %.3f",
+                 total_ms, total_audio, total_audio > 0 ? total_ms / 1000.0 / total_audio : 0.0);
         ESP_LOGI(TAG, "発話開始まで %.0f ms（先読み %u sample）/ 追い越し %d 回",
                  t_ready_ms, (unsigned)target, gaps);
         ESP_LOGI(TAG, "int16 クリップ %u sample", (unsigned)saan_speaker_clip_count());
         /* ⚠️ **移植が正しいことの唯一の機械的な証拠。** 「音が鳴った」ではなく、
-         *    本家 QEMU の記録値（W8A8: 0x04de91103a0e49f9 / W8A32: 0x78c209af06affc01）と
-         *    一致するかで判定する。checksum が違っても |max| と Σx² が合えば丸め差。 */
+         *    本家 QEMU の記録値と一致するかで判定する。checksum が違っても |max| と Σx² が合えば丸め差。
+         *    期待値（S3 = GELU の erf 近似以降のコア。本家 M-81 / M-90、blob v2）:
+         *      W8A8+PIE 0xa69a7ebbb5ccb05f（|max| 9627 / Σx² 74,264,237,672）
+         *      W8A32    0xe4b645c30835d42d（|max| 9529 / Σx² 74,155,591,505）
+         *    旧コア（2026-09-01 以前）は 0x04de91103a0e49f9 / 0x78c209af06affc01 だった。 */
         ESP_LOGI(TAG, "出力 PCM: %u sample / FNV-1a 0x%016llx",
                  (unsigned)saan_pcm_samples(), (unsigned long long)saan_pcm_checksum());
         ESP_LOGI(TAG, "        |max| %d / Σx² %llu",
@@ -333,17 +416,35 @@ static bool synth_once(const saan_weights *w, const int32_t *ids, int32_t n_ids)
         }
         if (gaps > 0)
             ESP_LOGW(TAG, "途切れた。次の発話は xRT 見込み %.2f で先読みを増やす", (double)g_xrt_est);
+#if SAAN_PROFILE
+        prof_report();
+#endif
 
         saan_ui_idle(gaps > 0 ? "途切れた" : "タッチでもう一度");
     }
     return ok;
 }
 
-/* --- 入力 1 行 → 合成 -----------------------------------------------------
+/* --- 拒否の理由を「どの文字か」まで出す -----------------------------------
  *
- * ⚠️ **拒否する理由を必ず「どの文字か」まで出す。** 未知語や記号は
- *    「黙って無音になる」のがこの入力仕様の一番危ない壊れ方なので、
+ * ⚠️ 未知語や記号は「黙って無音になる」のがこの入力仕様の一番危ない壊れ方なので、
  *    端末側では**必ずエラーにして位置を示す**（`err_byte`）。 */
+static void log_reject(const char *text, size_t nbytes, int32_t err_byte) {
+    if (err_byte < 0 || (size_t)err_byte >= nbytes) return;
+    /* err_byte から先の 1 文字（最大 4 B）を見せる。**何を消せばよいか分かるように。** */
+    char ch[8] = {0};
+    size_t k = 0;
+    for (size_t i = (size_t)err_byte; i < nbytes && k < 4; ++i, ++k) {
+        ch[k] = text[i];
+        if (k > 0 && ((unsigned char)text[i] & 0xC0u) != 0x80u) { ch[k] = '\0'; break; }
+    }
+    ESP_LOGE(TAG, "  受け付けない文字: \"%s\"（%d バイト目）", ch, (int)err_byte);
+}
+
+/* --- 入力 1 行 → 合成（かな経路）------------------------------------------
+ *
+ * 普段は speak_auto() が saan_g2p_classify() で「かな」と判定した行だけがここに来る
+ * （`=` 前置の強制も来る）。 */
 static bool speak_line(const saan_weights *w, const char *text, size_t nbytes) {
     g_last_n_ids = 0;   /* 失敗したら「もう一度」も無効にする（g_last_n_ids の ⚠️） */
     if (nbytes == 0) {
@@ -363,21 +464,12 @@ static bool speak_line(const saan_weights *w, const char *text, size_t nbytes) {
     t_g2p = esp_timer_get_time() - t_g2p;
 
     if (gs != SAAN_G2P_OK) {
+        /* ⚠️ speak_auto 経由なら**ここには来ないはず** — 呼ぶ前に saan_g2p_classify() が同じ
+         *    トークナイザで「かな経路」と判定している。来たら 2 つがずれた印（`=` の強制なら来うる）。 */
         ESP_LOGE(TAG, "G2P 失敗: %s（%d バイト目）", saan_g2p_strerror(gs), (int)gi.err_byte);
-        if (gs == SAAN_G2P_ERR_UNKNOWN && gi.err_byte >= 0
-            && (size_t)gi.err_byte < nbytes) {
-            /* err_byte から先の 1 文字（最大 4 B）を見せる。**何を消せばよいか分かるように。** */
-            char ch[8] = {0};
-            size_t k = 0;
-            for (size_t i = (size_t)gi.err_byte; i < nbytes && k < 4; ++i, ++k) {
-                ch[k] = text[i];
-                if (k > 0 && ((unsigned char)text[i] & 0xC0u) != 0x80u) { ch[k] = '\0'; break; }
-            }
-            ESP_LOGE(TAG, "  受け付けない文字: \"%s\"", ch);
-            ESP_LOGE(TAG, "  使えるのは **ひらがな** と [ ] # ° ー っ ん と ? ?! ?. ?~ だけ。"
-                          "漢字・カタカナ・句読点 (。、) は端末では扱わない");
-            ESP_LOGE(TAG, "  漢字混じり文からの変換は**ホスト側**（sanoTTS-jp リポジトリ）で: "
-                          "uv run python scripts/to_intermediate.py \"文\"");
+        if (gs == SAAN_G2P_ERR_UNKNOWN) {
+            log_reject(text, nbytes, gi.err_byte);
+            ESP_LOGE(TAG, "  かな中間表現で使えるのは **ひらがな** と [ ] # ° ー っ ん と ? ?! ?. ?~ だけ");
         }
         saan_ui_idle("入力エラー");
         return false;
@@ -415,10 +507,10 @@ static bool speak_line(const saan_weights *w, const char *text, size_t nbytes) {
 #if SAAN_KANJI
 /* --- 漢字かな交じり文 1 行 → 合成 ----------------------------------------
  *
- * 文 → k1_analyze（辞書 + Viterbi）→ mecab2njd → NJD 8 段 → jpcommon → ラベル → ids。
+ * 文 → jdict_analyze（辞書 + Viterbi）→ mecab2njd → NJD 8 段 → jpcommon → ラベル → ids。
  * ⚠️ **ホスト（フル辞書）とは一致しない。** 枝刈りの分だけ読みが変わる文がある
  *    （sanoTTS-jp 実測 17.79% の文。地名・固有名詞）。**既知の代償**であって欠陥ではない。
- * ⚠️ 未知語は「無音で消える」のではなく k1_unk_guess が 1 文字ずつ読みを推測する（平板）。 */
+ * ⚠️ 未知語は「無音で消える」のではなく jdict_unk_guess が 1 文字ずつ読みを推測する（平板）。 */
 static bool speak_kanji(const saan_weights *w, const char *text, size_t nbytes) {
     g_last_n_ids = 0;
     if (nbytes == 0) {
@@ -426,7 +518,7 @@ static bool speak_kanji(const saan_weights *w, const char *text, size_t nbytes) 
         return false;
     }
     if (!g_dict_ok) {
-        ESP_LOGE(TAG, "辞書が開けていない。`=` 前置のかな中間表現だけ使える");
+        ESP_LOGE(TAG, "辞書が開けていない。かな中間表現だけ使える（例: きょ][おわよ][いて][んきです°ね）");
         saan_ui_idle("辞書なし");
         return false;
     }
@@ -456,6 +548,67 @@ static bool speak_kanji(const saan_weights *w, const char *text, size_t nbytes) 
     return synth_once(w, g_ids, n_ids);
 }
 #endif /* SAAN_KANJI */
+
+/* --- 入力 1 行 → 経路を選んで合成（本家 K-B / T11）-------------------------
+ *
+ * **前置記号は要らない。** 1 本のプロンプトで「かな中間表現」と「漢字かな交じり文」の
+ * 両方を受け、`saan_g2p_classify()`（components/saanotts_core/g2p.c）が経路を決める:
+ *   かな   … トークン化が行末まで通った            → speak_line
+ *   辞書   … 通らず、行に中間表現のマークが 1 つも無い → speak_kanji（-DSAAN_KANJI=0 なら喋らずに理由を出す）
+ *   拒否   … 通らないのにマークが混じっている        → 喋らない。位置を見せる
+ *
+ * ⚠️ **経路を必ずログに出す。** どちらで読まれたかが分からないと、読み違いを見ても
+ *    「辞書が悪いのか判定が悪いのか」を切り分けられない。
+ * ⚠️ **拒否をそのまま残す。** 「中間表現 + `。`」を黙って辞書経路に回すと `[` `]` `#` が
+ *    記号として読まれたり落とされたりして**それらしい音が出てしまう**（気づけない壊れ方）。
+ * ⚠️ 判定は手書きの文字集合ではなく、凍結テーブルのトークナイザが行末まで通るかそのもの。
+ *    ホスト側 `scripts/kana_g2p.py` の classify_route() と同じ規則（本家 kb_route_parity.py が守る）。 */
+static bool speak_auto(const saan_weights *w, const char *text, size_t nbytes) {
+    if (nbytes == 0) {
+        ESP_LOGW(TAG, "空行。かな中間表現か漢字かな交じり文を入力すること"
+                      "（例: きょ][おわよ][いて][んきです°ね / 今日は良い天気ですね。）");
+        g_last_n_ids = 0;
+        return false;
+    }
+
+    saan_g2p_status why = SAAN_G2P_OK;
+    int32_t err_byte = -1;
+    const saan_g2p_route route = saan_g2p_classify(text, nbytes, &why, &err_byte);
+    ESP_LOGI(TAG, "経路: %s", saan_g2p_route_name(route));
+
+    if (route == SAAN_G2P_ROUTE_KANA) return speak_line(w, text, nbytes);
+
+    if (route == SAAN_G2P_ROUTE_DICT) {
+#if SAAN_KANJI
+        return speak_kanji(w, text, nbytes);
+#else
+        /* ⚠️ **喋らずに理由を出す。** 辞書を持たないビルドでこの行をかな経路に
+         *    無理やり通すと、読めない文字が黙って落ちる。 */
+        g_last_n_ids = 0;
+        ESP_LOGE(TAG, "この構成は辞書を持たない（-DSAAN_KANJI=0）ので、漢字・カタカナ・句読点は扱えない");
+        log_reject(text, nbytes, err_byte);
+        ESP_LOGE(TAG, "  漢字混じり文からの変換は**ホスト側**（sanoTTS-jp リポジトリ）で: "
+                      "uv run python scripts/to_intermediate.py \"文\"");
+        saan_ui_idle("辞書なし");
+        return false;
+#endif
+    }
+
+    /* 拒否 */
+    g_last_n_ids = 0;
+    if (why == SAAN_G2P_ERR_UTF8) {
+        ESP_LOGE(TAG, "不正な UTF-8（%d バイト目）。端末は UTF-8 しか受けない", (int)err_byte);
+        saan_ui_idle("入力エラー");
+        return false;
+    }
+    ESP_LOGE(TAG, "かな中間表現として読めないのに、中間表現の記号"
+                  "（[ ] # ° _ ^ $ ? ?! ?. ?~）が混じっている。**喋らない**");
+    log_reject(text, nbytes, err_byte);
+    ESP_LOGE(TAG, "  かな中間表現なら: **ひらがな** と [ ] # ° ー っ ん と ? ?! ?. ?~ だけ（句読点 。、 は入れない）");
+    ESP_LOGE(TAG, "  漢字かな交じり文なら: 中間表現の記号を消してから入力すること");
+    saan_ui_idle("入力エラー");
+    return false;
+}
 
 /* --- 起動セルフテスト -----------------------------------------------------
  *
@@ -498,31 +651,28 @@ static bool boot_selftest(int32_t *n_ids_out) {
     return true;
 }
 
-static void print_usage_kana(void);
-
 static void print_usage(void) {
     ESP_LOGI(TAG, "==================== 対話モード ====================");
+    ESP_LOGI(TAG, "1 行入力して Enter で喋る。**経路は自動で決まる**（前置記号は要らない）。");
+    ESP_LOGI(TAG, "  かな中間表現:  きょ][おわよ][いて][んきです°ね     （今日は良い天気ですね。）");
+    ESP_LOGI(TAG, "  ひらがなだけ:  こんにちわ");
+    ESP_LOGI(TAG, "記号:  [ 上昇 / ] 下降核 / # 句境界 / ° 無声化 / ? ?! ?. ?~ 疑問");
 #if SAAN_KANJI
-    ESP_LOGI(TAG, "**文をそのまま 1 行入力して Enter で喋る**（漢字かな交じり文。端末内の辞書で読む）。");
+    ESP_LOGI(TAG, "**漢字かな交じり文はそのまま入力する**（端末内の辞書 + Open JTalk で読む）。");
     ESP_LOGI(TAG, "  例:  今日は良い天気ですね。");
     ESP_LOGI(TAG, "  ⚠️ 辞書は枝刈りしてあるので、ホストと読みが変わる文がある（地名・固有名詞）");
-    ESP_LOGI(TAG, "`=` で始めるとかな中間表現として扱う（突き合わせ用）:");
+    ESP_LOGI(TAG, "強制（試験用）: `=` 前置でかな中間表現として、`!` 前置で辞書経路として扱う。");
 #else
-    ESP_LOGI(TAG, "かな中間表現を 1 行入力して Enter で喋る（`=` 前置も可）:");
-#endif
-    print_usage_kana();
-    ESP_LOGI(TAG, "画面をタッチすると直前の文をもう一度喋る。");
-    ESP_LOGI(TAG, "====================================================");
-}
-
-static void print_usage_kana(void) {
-    ESP_LOGI(TAG, "  例:  =きょ][おわよ][いて][んきです°ね     （今日は良い天気ですね。）");
-    ESP_LOGI(TAG, "記号:  [ 上昇 / ] 下降核 / # 句境界 / ° 無声化 / ? ?! ?. ?~ 疑問");
-    ESP_LOGI(TAG, "⚠️ **漢字・カタカナ・句読点は受け付けない**（端末に辞書が無い）。");
+    ESP_LOGI(TAG, "⚠️ **この構成は辞書を持たない**（-DSAAN_KANJI=0）ので、漢字・カタカナ・句読点は喋れない。");
     ESP_LOGI(TAG, "   漢字混じり文からは**ホスト側**（sanoTTS-jp リポジトリ）で作る:");
     ESP_LOGI(TAG, "     uv run python scripts/to_intermediate.py \"今日は良い天気ですね。\"");
+    ESP_LOGI(TAG, "強制（試験用）: `=` 前置でかな中間表現として扱う。");
+#endif
+    ESP_LOGI(TAG, "⚠️ 中間表現の記号が混じったまま読めない行は拒否する（例: きょ][おわ…です°ね。）。");
     ESP_LOGI(TAG, "⚠️ アクセント記号を省くと平板になる。**音は出るが正しい抑揚ではない。**");
     ESP_LOGI(TAG, "編集: BS/DEL 1 文字消す / Ctrl-U 行を消す / 上限 %d ids", (int)SAAN_MAX_IDS);
+    ESP_LOGI(TAG, "画面をタッチすると直前の文をもう一度喋る。");
+    ESP_LOGI(TAG, "====================================================");
 }
 
 static void tts_task(void *arg) {
@@ -537,12 +687,17 @@ static void tts_task(void *arg) {
 
 #if SAAN_KANJI
     /* 辞書は重みの後に開く（MMU の窓は flash と PSRAM で共有。起動ログに空き量が出る）。
-     * 開けなくても `=` のかな入力だけで続ける。 */
+     * 開けなくてもかな入力だけで続ける。 */
     g_dict_ok = saan_dict_open(&g_dict) && (saan_kanji_init() != 0);
     if (!g_dict_ok)
         ESP_LOGW(TAG, "辞書を開けなかった（または作業領域を取れなかった）。**かな入力だけ**で続ける");
     else
-        ESP_LOGI(TAG, "漢字経路の作業領域 %u B", (unsigned)saan_kanji_workbytes());
+        /* ⚠️ **2 つとも出す。** workbytes は「最低限これだけ要る」、Viterbi バイト数は「実際に渡る」。
+         *    T10(a) で固定長の配列を arena へ移したぶん後者が減るので、減りすぎ
+         *    （16 KB 未満で SAAN_KANJI_ERR_TOO_LONG）に気づけるようにしておく。 */
+        ESP_LOGI(TAG, "漢字経路の作業領域 %u B（最低限）/ Viterbi に渡る %u B（arena %d B のうち）",
+                 (unsigned)saan_kanji_workbytes(),
+                 (unsigned)saan_kanji_vitbytes(SAAN_ARENA_BYTES), (int)SAAN_ARENA_BYTES);
     log_heap("辞書 mmap 後");
 #endif
 
@@ -559,7 +714,7 @@ static void tts_task(void *arg) {
                           "この構成では PIE は 1 命令も効かない。int8 blob を使うこと");
             vTaskDelete(NULL); return;
         }
-        ESP_LOGI(TAG, "W8A8 + PIE 有効 / int8 blob を確認");
+        ESP_LOGI(TAG, "W8A8 + PIE 有効 / int8 blob（形式 v%" PRIu32 "）を確認", w.version);
     }
 #endif
 
@@ -614,16 +769,25 @@ static void tts_task(void *arg) {
             saan_console_prompt();
             continue;
         }
-        /* `=` 前置はかな中間表現（本家 QEMU と突き合わせる用）。
-         * 漢字対応ビルドではそれ以外を文そのものとして辞書で読む。 */
-        const char *body = (n > 0 && line[0] == '=') ? line + 1 : line;
-        size_t body_n = (n > 0 && line[0] == '=') ? (size_t)n - 1 : (size_t)n;
+        /* 既定は speak_auto() が経路を決める（前置記号は要らない）。
+         * ⚠️ **前置記号は試験用の強制だけに残してある**: `=` でかな中間表現（判定を通さずに
+         *    saan_g2p に渡す。旧仕様との互換）、`!` で辞書経路（本家と同じ。「同じ行を無理やり
+         *    辞書経路に流したらどうなるか」を測るのに要る）。 */
+        if (n > 0 && line[0] == '=') {
+            ESP_LOGI(TAG, "経路: かな（`=` による強制）");
+            (void)speak_line(&w, line + 1, (size_t)n - 1);
+            saan_console_prompt();
+            continue;
+        }
 #if SAAN_KANJI
-        if (body != line) (void)speak_line(&w, body, body_n);
-        else              (void)speak_kanji(&w, body, body_n);
-#else
-        (void)speak_line(&w, body, body_n);
+        if (n > 0 && line[0] == '!') {
+            ESP_LOGI(TAG, "経路: 辞書（`!` による強制）");
+            (void)speak_kanji(&w, line + 1, (size_t)n - 1);
+            saan_console_prompt();
+            continue;
+        }
 #endif
+        (void)speak_auto(&w, line, (size_t)n);
         saan_console_prompt();
     }
 

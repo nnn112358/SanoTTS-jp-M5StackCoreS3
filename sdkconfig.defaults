@@ -15,13 +15,13 @@ CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 #    `octal_psram: PSRAM chip is not connected` → abort() でブートループする。
 #    ESP32-S3-WROOM-1-N16R8 が Octal なので間違えやすい。
 #
-# 使い道: saan_speaker.cpp の音声バッファ 28,672 B（spk_alloc が PSRAM 優先で取る）。
-#   arena 208 KB は速度のため内部 DRAM (.bss) のまま。重みは .rodata (flash)。
+# 使い道: saan_speaker.cpp の音声バッファ（PSRAM 優先で取る）と、Open JTalk の一時ヒープ
+#   （components/saanotts_core/oj_heap_psram.c。1 文あたり最大約 105 KB）。
+#   arena 176 KB は速度のため内部 DRAM (.bss) のまま。重みは .rodata (flash)。
 #
-# ⚠️ **PSRAM 有効時は実行時の esp_partition_mmap が ESP_ERR_NO_MEM で落ちる**
-#    （8 MB が data 用 vaddr を占有する。CoreS3 実機で実測、1 MB でも同じ）。
-#    重みをヘッダ埋め込み（app の DROM として起動時にマップ）にしたのはこのため。
-#    **パーティション mmap 方式に戻すなら PSRAM を切ること。**
+# ⚠️ かつて「PSRAM 有効時は esp_partition_mmap が ESP_ERR_NO_MEM で落ちる」と書いたが、
+#    **真因は PSRAM ではなく CONFIG_SPI_FLASH_ROM_IMPL=y**（下の項）。重みをヘッダ埋め込み
+#    （app の DROM として起動時にマップ）にした判断自体は変えていない。
 # ⚠️ S3 の Quad PSRAM は flash と同じ SPI0 を共有する。**速度への影響は未測定。**
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_QUAD=y
@@ -69,12 +69,13 @@ CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
 # 1 発話の合成は数秒かかる。タスク WDT に噛まれないようにする。
 CONFIG_ESP_TASK_WDT_INIT=n
 
-# --- 内部 DRAM を空ける（CoreS3 では arena 208 KB が効いて余裕が無い）----------
+# --- 内部 DRAM を空ける（CoreS3 では arena が効いて余裕が無い）----------------
 #
 # ⚠️ **ESP32-S3 の D/IRAM は共有プール（341,760 B）。** IRAM に置かれたコードは
-#    そのぶん DRAM を食う。arena 208 KB + M5GFX/M5Unified を積むと
+#    そのぶん DRAM を食う。旧コアの arena 208 KB + M5GFX/M5Unified を積むと
 #    **残り 18,745 B** しかなく、起動時のタスクスタック（main 8 KB + 合成 16 KB）が
-#    取れない。IRAM に置く必要のないコードを flash へ移す。
+#    取れなかった。IRAM に置く必要のないコードを flash へ移す。
+#    （2026-09-04 の同期で arena は 176 KB に下がったが、この設定は残す）
 #
 # ⚠️ **flash 書き込み中に走る ISR があると壊れる設定。** このファームは
 #    実行時に flash へ書かない（重みは mmap して**読むだけ**）ので安全。
@@ -84,8 +85,14 @@ CONFIG_FREERTOS_PLACE_SNAPSHOT_FUNS_INTO_FLASH=y
 CONFIG_HEAP_PLACE_FUNCTION_INTO_FLASH=y
 CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=y
 CONFIG_RINGBUF_PLACE_ISR_FUNCTIONS_INTO_FLASH=y
-# ⚠️ CONFIG_SPI_FLASH_ROM_IMPL=y は**使わない**。ROM 内の旧 spi_flash_mmap（ページ数に上限）に
-#    差し替わり、辞書 13.7 MB どころか 1 MB の esp_partition_mmap も ESP_ERR_NO_MEM で落ちる
-#    （CoreS3 実機で実測。esp_mmu_map の空きは 22.7 MB あった）。IRAM を約 9 KB 余計に使う。
-CONFIG_SPI_FLASH_ROM_IMPL=n
+# CONFIG_SPI_FLASH_ROM_IMPL=y だと spi_flash_mmap が **ROM 内の実装**に差し替わり、IDF はそれに
+#    128 ページ = 8 MB のプールしか渡さない。そのため `esp_partition_mmap` で辞書 13.7 MB
+#    （223 ページ）は貼れない（CoreS3 実機で ESP_ERR_NO_MEM を実測。vaddr 不足ではなかった）。
+#    2026-09-04 の同期で持ってきた本家の saan_dict.c は、この設定のとき自動で
+#    **esp_mmu_map**（component esp_mm。ROM 実装と無関係で上限に当たらない）に切り替える。
+#    本家が CoreS3 で同じ組み合わせ（ROM_IMPL=y + esp_mmu_map + PSRAM 8 MB + 辞書）で
+#    動かしている（M-90: 連続 vaddr 23.7 MB 空き）ので、内部 DRAM を約 9 KB 空けるために y にした。
+#    ⚠️ **このリポジトリの実機では未確認**（2026-09-04 時点）。辞書が開けなくなったら n に戻す
+#    （そのとき saan_dict.c は従来の esp_partition_mmap 経路になる）。
+CONFIG_SPI_FLASH_ROM_IMPL=y
 CONFIG_SPI_MASTER_ISR_IN_IRAM=n

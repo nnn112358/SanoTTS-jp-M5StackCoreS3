@@ -1,10 +1,13 @@
-# ファーム本体。main.c / saan_model.c / saan_console.c は sanoTTS-jp/esp32/main から
-# コピーしたもので、音声出力だけ M5.Speaker 版（saan_speaker.cpp）に差し替えてある。
-# 本家の saan_i2s.c / saan_i2s.h（driver/i2s_std 直叩き）は**持ってこない**。
+# ファーム本体。main.c は sanoTTS-jp/esp32/main/main.c を CoreS3 向け（顔・先読み自動）に
+# 改変したもの。saan_console.{c,h} / saan_dict.{c,h} / saan_kanji.{c,h} は本家 origin/main
+# （d169e91、2026-09-04）の**そのままのコピー**。音声出力は M5.Speaker 版（saan_speaker.cpp）、
+# 画面は m5stack-avatar 版（saan_ui.cpp）。本家の saan_i2s.c / saan_pcm.c / saan_audio.h は
+# **持ってこない**（PCM 統計は saan_speaker.cpp が持つ）。
 #
-# esp_partition は辞書（dict パーティション）の mmap に要る。重みはヘッダ埋め込み (.rodata)。
-#    パーティション mmap の経路は持っていない（CoreS3 では PSRAM と競合して
-#    ESP_ERR_NO_MEM になるため。partitions.csv 参照）。
+# esp_partition は辞書（dict パーティション）を**探す**のに要る。貼るのは esp_mmu_map（esp_mm）:
+#    saan_dict.c は CONFIG_SPI_FLASH_ROM_IMPL=y のとき自動で esp_mmu_map に切り替える
+#    （ROM 実装の spi_flash_mmap は 128 ページ = 8 MB までしか貼れない。本家 M-90）。
+#    重みはヘッダ埋め込み (.rodata) なので、パーティション mmap の経路は持っていない。
 # ⚠️ **`driver`（傘）は要らない。** コンソールが使うのは usb_serial_jtag と uart だけ。
 #    傘を書くと全 esp_driver_* が IRAM を食う。
 # 端末内漢字 G2P（-DSAAN_KANJI=0 で外す。値は components/saanotts_core が決めて CACHE に置く）
@@ -92,7 +95,17 @@ endif()
 
 # --- 端末内漢字 G2P（-DSAAN_KANJI=0 で外す）------------------------------------
 # ⚠️ コア component と同じ条件で main 側にも渡す。saan_kanji.c が Open JTalk のヘッダを
-#    include するので CHARSET_UTF_8 も要る。
+#    include するので CHARSET_UTF_8 も要る。LABEL_IDS_EXTERNAL_SCRATCH はコア component が
+#    PUBLIC で定義するのでここでは書かない（saan_kanji.h がそれを見て作業領域の寸法を決める）。
 if(SAAN_KANJI)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE SAAN_KANJI=1 CHARSET_UTF_8)
+endif()
+
+# --- 段別プロファイラ（-DSAAN_PROFILE=1。既定は無効）--------------------------------
+# ⚠️ コア component と同じ条件で main 側にも渡す。main.c が saan_prof_now()（CCOUNT）を
+#    定義し、発話のあとに表を出す。片方だけだとリンクエラー（saan_prof_now 未定義）か、
+#    表が出ないまま計測コストだけ払うことになる。
+if(SAAN_PROFILE)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE SAAN_PROFILE=1)
+    message(STATUS "sanoTTS: main 側も SAAN_PROFILE=1（発話後に段別の表を出す）")
 endif()

@@ -3,5 +3,6 @@
 #   scripts/get_dict.sh            → model/k1-dict-438750.bin
 set -euo pipefail
 cd "$(dirname "$0")/.."
-gh release download v0.2.0 --repo ayutaz/sanoTTS-jp --pattern 'k1-dict-438750.bin' --dir model --clobber
+# v0.3.0 の資産（v0.2.0 と同じ SHA-256。下の行で検証する）
+gh release download v0.3.0 --repo ayutaz/sanoTTS-jp --pattern 'k1-dict-438750.bin' --dir model --clobber
 echo "f162c922074d76817298b34d8a8fd35f7d195f38540303485a76c956b5d84877  model/k1-dict-438750.bin" | sha256sum -c -

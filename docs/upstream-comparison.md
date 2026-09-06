@@ -21,7 +21,7 @@ GPL が伝播して MIT で配布できなくなるので、**ソースコード
 |---|---|---|
 | 論文 | arXiv:2608.21378（同じ著者らの公式実装） | 同じ論文からの **clean-room 再実装**（論文の数値だけから） |
 | ライセンス | GPL-3.0 | MIT（重みは sanoTTS-jp Model License 1.0） |
-| MCU 向けモデル | en_US kristin **567,008 params**（R7）、int8 ~680 KB。別途 heart-nano 294 k（24 kHz） | 559,008 params（語彙 57）、int8 **643,936 B**（22.05 kHz） |
+| MCU 向けモデル | en_US kristin **567,008 params**（R7）、int8 ~680 KB。別途 heart-nano 294 k（24 kHz） | 559,008 params（語彙 57）、int8 **654,032 B**（blob v2。v1 は 643,936 B。22.05 kHz） |
 | 構成 | duration → acoustic → iSTFT decoder（同じ） | 同じ。3 モデルを 40 次元 c-line で接続 |
 | G2P | **espeak-ng を同梱**（en_dict だけで 168 KB、SPIFFS 275 KB） | **かな中間表現 → 音素表 877 B**（漢字はホスト側） |
 | 重みの置き場 | flash XIP + **SIMD が読む前に SRAM へステージング**（arena 内） | flash（app の .rodata）を **PIE が直接読む** |
@@ -75,6 +75,14 @@ FINAL の段別内訳（2 コア、合計 641 ms / 音声 4.416 s）:
 5. 95% 使用の malloc は賭け — arena だけが生き残る
 
 ## 3. 本プロジェクトへの含意（xRT 1.55 をどう縮めるか）
+
+> **2026-09-04 追記。** この節は 2026-09-02 の xRT 1.55（旧コア）を前提に書いた。その後 sanoTTS-jp 本家が
+> S1〜S5b / T1〜T5 で CoreS3 の定常 xRT を **0.926 → 0.446** まで詰め（本家 M-90。手は「テンソル検索の
+> 集約 / 量子化のソフト除算と `rintf` の除去 / GELU の `erff` を表に / blob v2 で重みの転置コピーを消す /
+> PIE の内積を loopnez + weight-stationary に / ストリーミングで有効範囲だけ計算 / arena 詰め」で、
+> 下の表の 1〜3 とは別のもの）、本リポジトリも同日そのコアに同期した。**上流（Ampixa）の 0.22× との差は
+> いま約 2 倍**で、下の表の (b) 2 コア化と (c) iSTFT のペア化が残っている。段別プロファイラ
+> （`-DSAAN_PROFILE=1`）は本家 M-80 で入ったので、優先 0 は実機で `./idf.sh -DSAAN_PROFILE=1 build` するだけ。
 
 本プロジェクトのホスト側（sanoTTS-jp `reports/d3b_latency_fft.json`、fp32、M4 Max）の段別は
 decoder 60% / acoustic 25% / token block 13% / iSTFT < 1%。実機（int8 + PIE）では積和が縮んで

@@ -2,6 +2,7 @@
 #include "saanotts.h"
 
 #include "saanotts_internal.h"
+#include "saan_prof.h"
 
 #include "fft.h"
 
@@ -34,11 +35,23 @@ static uint64_t rd_u64(const uint8_t *p) {
 saan_status saan_weights_open(saan_weights *w, const void *blob, size_t size) {
     const uint8_t *b = (const uint8_t *)blob;
     if (size < 16 || memcmp(b, "SAAN", 4) != 0) return SAAN_ERR_MAGIC;
-    if (rd_u32(b + 4) != 1u) return SAAN_ERR_VERSION;
+    const uint32_t ver = rd_u32(b + 4);
+    if (ver != 1u && ver != 2u) return SAAN_ERR_VERSION;
     w->base = b;
     w->size = size;
+    w->version = ver;
     w->n_tensors = rd_u32(b + 8);
     if (16u + (size_t)w->n_tensors * HDR_ENT > size) return SAAN_ERR_SHAPE;
+    /* ⚠️ **v1 で int8（dtype 1）を持つ blob は拒む。** v1 の int8 conv 重みは [cout][cin][k]
+     *    で、v2 のカーネルが [cout][k][cinp] として読むと**黙って別物の音**が出る
+     *    （例外も NaN も出ない）。名前は同じなので saan_w では区別できない。ここで止める。
+     *    fp32 だけの v1（golden.bin / ids_heldout.bin）はレイアウトが変わっていないので通す。 */
+    if (ver == 1u) {
+        for (uint32_t i = 0; i < w->n_tensors; ++i) {
+            const uint8_t *e = w->base + 16 + (size_t)i * HDR_ENT + NAME_LEN;
+            if (rd_u32(e) == 1u) return SAAN_ERR_VERSION;
+        }
+    }
     return SAAN_OK;
 }
 
@@ -47,6 +60,8 @@ const void *saan_tensor(const saan_weights *w, const char *name,
     for (uint32_t i = 0; i < w->n_tensors; ++i) {
         const uint8_t *e = w->base + 16 + (size_t)i * HDR_ENT;
         if (strncmp((const char *)e, name, NAME_LEN) != 0) continue;
+        /* 走査したヘッダのエントリ数（× HDR_ENT B が flash から読む量）。プロファイラ用 */
+        SAAN_PROF_ADD(SAAN_PROF_LOOKUP, i + 1);
         const uint8_t *p = e + NAME_LEN;
         if (dtype) *dtype = rd_u32(p);
         if (dims) for (int k = 0; k < 4; ++k) dims[k] = rd_u32(p + 8 + 4 * k);
@@ -55,6 +70,7 @@ const void *saan_tensor(const saan_weights *w, const char *name,
         if (nbytes) *nbytes = nb;
         return w->base + off;
     }
+    SAAN_PROF_ADD(SAAN_PROF_LOOKUP, w->n_tensors);
     return NULL;
 }
 
@@ -62,12 +78,17 @@ const void *saan_tensor(const saan_weights *w, const char *name,
 const float *saan_tf(const saan_weights *w, const char *fmt, ...) {
     char buf[NAME_LEN];
     va_list ap;
+    SAAN_PROF_BEGIN(SAAN_PROF_LOOKUP);
     va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
-    uint32_t dt;
-    const void *p = saan_tensor(w, buf, &dt, NULL, NULL);
-    return (p && dt == 0) ? (const float *)p : NULL;
+    {
+        uint32_t dt;
+        const void *p = saan_tensor(w, buf, &dt, NULL, NULL);
+        const float *r = (p && dt == 0) ? (const float *)p : NULL;
+        SAAN_PROF_END(SAAN_PROF_LOOKUP);
+        return r;
+    }
 }
 
 /* --- arena --------------------------------------------------------------- */
@@ -119,14 +140,22 @@ size_t saan_arena_needed(int32_t n_ids) {
 
 /* --- 基本カーネル -------------------------------------------------------- */
 
-/* y[o,t] = b[o] + Σ_i Σ_k W[o,i,k] · x[i, t + k - pad]  （ゼロパディング） */
-void saan_conv1d(float *y, const float *x, const float *W, const float *b,
-                   int cin, int cout, int ksz, int T) {
+/* y[o,t] = b[o] + Σ_i Σ_k W[o,i,k] · x[i, t + k - pad]  （ゼロパディング）
+ *
+ * S9（T2）: 出力の時刻 [t0, t1) だけを計算し、y は圧縮した [cout][t1 - t0] に書く。
+ * ⚠️ **ループの順序（o / t を bias で初期化 / i 外側 / k 内側 / t 最内）と、各タップの
+ *    有効範囲の取り方は [0, T) 版から 1 文字も変えていない。** 範囲は最内ループの上下限を
+ *    [t0, t1) と交わすだけなので、出力要素ごとの積和順序は同じ = bit 同一
+ *    （stream G2 多文が一括版との memcmp で守る。saanotts_internal.h の説明）。 */
+void saan_conv1d_r(float *y, const float *x, const float *W, const float *b,
+                   int cin, int cout, int ksz, int T, int t0, int t1) {
     const int pad = ksz / 2;
+    const int Ty = t1 - t0;
+    SAAN_PROF_BEGIN(SAAN_PROF_CONV32);
     for (int o = 0; o < cout; ++o) {
-        float *yo = y + (size_t)o * T;
+        float *yo = y + (size_t)o * Ty;
         const float bias = b ? b[o] : 0.0f;
-        for (int t = 0; t < T; ++t) yo[t] = bias;
+        for (int t = 0; t < Ty; ++t) yo[t] = bias;
         for (int i = 0; i < cin; ++i) {
             const float *xi = x + (size_t)i * T;
             const float *wk = W + ((size_t)o * cin + i) * ksz;
@@ -134,64 +163,177 @@ void saan_conv1d(float *y, const float *x, const float *W, const float *b,
                 const float wv = wk[k];
                 if (wv == 0.0f) continue;
                 const int sh = k - pad;
-                const int t0 = sh < 0 ? -sh : 0;
-                const int t1 = sh > 0 ? T - sh : T;
-                for (int t = t0; t < t1; ++t) yo[t] += wv * xi[t + sh];
+                int ta = sh < 0 ? -sh : 0;      /* このタップが [0, T) の中で有効な t */
+                int tb = sh > 0 ? T - sh : T;
+                if (ta < t0) ta = t0;           /* 出力範囲 [t0, t1) と交わす */
+                if (tb > t1) tb = t1;
+                for (int t = ta; t < tb; ++t) yo[t - t0] += wv * xi[t + sh];
             }
         }
     }
+    SAAN_PROF_END(SAAN_PROF_CONV32);
+    SAAN_PROF_ADD(SAAN_PROF_CONV32, (size_t)cout * cin * ksz * Ty);
 }
 
-/* depthwise: 出力チャネル o は入力チャネル o だけを見る */
-void saan_dwconv1d(float *y, const float *x, const float *W,
-                     int ch, int ksz, int T) {
+void saan_conv1d(float *y, const float *x, const float *W, const float *b,
+                   int cin, int cout, int ksz, int T) {
+    saan_conv1d_r(y, x, W, b, cin, cout, ksz, T, 0, T);
+}
+
+/* depthwise: 出力チャネル o は入力チャネル o だけを見る（範囲の規則は saan_conv1d_r と同じ） */
+void saan_dwconv1d_r(float *y, const float *x, const float *W,
+                     int ch, int ksz, int T, int t0, int t1) {
     const int pad = ksz / 2;
+    const int Ty = t1 - t0;
+    SAAN_PROF_BEGIN(SAAN_PROF_CONV32);
     for (int o = 0; o < ch; ++o) {
-        float *yo = y + (size_t)o * T;
+        float *yo = y + (size_t)o * Ty;
         const float *xi = x + (size_t)o * T;
         const float *wk = W + (size_t)o * ksz;
-        for (int t = 0; t < T; ++t) yo[t] = 0.0f;
+        for (int t = 0; t < Ty; ++t) yo[t] = 0.0f;
         for (int k = 0; k < ksz; ++k) {
             const float wv = wk[k];
             const int sh = k - pad;
-            const int t0 = sh < 0 ? -sh : 0;
-            const int t1 = sh > 0 ? T - sh : T;
-            for (int t = t0; t < t1; ++t) yo[t] += wv * xi[t + sh];
+            int ta = sh < 0 ? -sh : 0;
+            int tb = sh > 0 ? T - sh : T;
+            if (ta < t0) ta = t0;
+            if (tb > t1) tb = t1;
+            for (int t = ta; t < tb; ++t) yo[t - t0] += wv * xi[t + sh];
         }
     }
+    SAAN_PROF_END(SAAN_PROF_CONV32);
+    SAAN_PROF_ADD(SAAN_PROF_CONV32, (size_t)ch * ksz * Ty);
+}
+
+void saan_dwconv1d(float *y, const float *x, const float *W,
+                     int ch, int ksz, int T) {
+    saan_dwconv1d_r(y, x, W, ch, ksz, T, 0, T);
 }
 
 /* PyTorch の LayerNorm は **チャネル方向**に正規化する（[B,T,C] の C）。
  * ここは [C,T] レイアウトなので、時刻ごとに C 本を見る。**軸を間違えると
- * 数値は出るが別物になる**（参照実装は h.transpose(1,2) して LayerNorm） */
+ * 数値は出るが別物になる**（参照実装は h.transpose(1,2) して LayerNorm）
+ *
+ * ⚠️ **列を連続メモリに写してから計算する（T2 / S9 で入れた）。** 理由は「結果が T に
+ *    依存してはいけない」から。以前は x[c*T + t] をストライド T で直接舐めていたが、
+ *    clang（macOS / -O2）はこの c ループを **T == 1 のときだけ**ベクトル化し、その経路では
+ *    `var += d*d` が fmul.4s + fadd（融合なし）、ストライド経路（T > 1）では fmadd（融合あり）
+ *    になる。つまり**同じ列でも T=1 と T>1 で最終ビットが違った**（実測: 500 試行中 71 で 1 ulp）。
+ *    S9 で token block の最終段が n2 = 1 列（1 チャンクが 1 トークンに収まるとき）になり、
+ *    held-out 24 文中 2 文（#11 / #18。トークン長 13〜18 フレーム）だけ stream G2 が落ちた。
+ *    連続の局所配列 `col` に写せばループの形が C だけで決まり、T（一括 n_frames / stream CH /
+ *    token 1〜24）に依らず同じコード経路 = 同じ丸めになる。
+ *    Xtensa（gcc、ベクトル化なし）では算術の並びが変わらないので QEMU の checksum は不変。
+ *    `make -C csrc range` の G-LN がこの T 非依存を陽性対照つきで守る。
+ * ⚠️ C は SAAN_LN_MAXC 以下（呼び出し側は SAAN_DUR_W = 32 / SAAN_AC_W = 48。下で静的に検査） */
+#define SAAN_LN_MAXC 64
+typedef char saan_ln_maxc_check[(SAAN_DUR_W <= SAAN_LN_MAXC && SAAN_AC_W <= SAAN_LN_MAXC) ? 1 : -1];
+
 void saan_layernorm_c(float *x, const float *g, const float *b, int C, int T) {
     const float eps = 1e-5f;
+    float col[SAAN_LN_MAXC];
+    SAAN_PROF_BEGIN(SAAN_PROF_LN);
+    if (C > SAAN_LN_MAXC) C = SAAN_LN_MAXC;   /* 上の静的検査で到達しない。黙って越えないための保険 */
     for (int t = 0; t < T; ++t) {
+        for (int c = 0; c < C; ++c) col[c] = x[(size_t)c * T + t];
         float mean = 0.0f;
-        for (int c = 0; c < C; ++c) mean += x[(size_t)c * T + t];
+        for (int c = 0; c < C; ++c) mean += col[c];
         mean /= (float)C;
         float var = 0.0f;
         for (int c = 0; c < C; ++c) {
-            const float d = x[(size_t)c * T + t] - mean;
+            const float d = col[c] - mean;
             var += d * d;
         }
         var /= (float)C;
         const float inv = 1.0f / sqrtf(var + eps);
-        for (int c = 0; c < C; ++c) {
-            float *p = &x[(size_t)c * T + t];
-            *p = (*p - mean) * inv * g[c] + b[c];
-        }
+        for (int c = 0; c < C; ++c)
+            x[(size_t)c * T + t] = (col[c] - mean) * inv * g[c] + b[c];
     }
+    SAAN_PROF_END(SAAN_PROF_LN);
+    SAAN_PROF_ADD(SAAN_PROF_LN, (size_t)C * T);
 }
 
 void saan_relu(float *x, size_t n) {
+    SAAN_PROF_BEGIN(SAAN_PROF_RELU);
     for (size_t i = 0; i < n; ++i) if (x[i] < 0.0f) x[i] = 0.0f;
+    SAAN_PROF_END(SAAN_PROF_RELU);
+    SAAN_PROF_ADD(SAAN_PROF_RELU, n);
 }
 
-/* PyTorch の既定は tanh 近似ではなく erf 版 */
+/* --- erf の近似（S3）-------------------------------------------------------
+ *
+ * なぜ: GELU は要素ごとに `erff()` を呼び、1 step に 21,664 回（M-80）。newlib の erff は
+ * 多項式 + `expf` の関数呼び出しで、QEMU の命令数比で 1 step の 14〜25% を使っていた。
+ *
+ * 方式: x ∈ [0, 4] を h = 1/32 の 128 区間に割り、節点の erf と erf'·h を表に持ち（erf_table.h。
+ * 導関数は T5-G4 で h を掛けた値で持つ）、区間内は 3 次 Hermite。奇関数なので |x| で計算して符号を戻す。|x| ≥ 4 は ±1
+ * （erf(4) = 1 − 1.5e-8 は float で 1.0）。理論誤差 h⁴/384 · max|erf⁗| ≈ 1.1e-8 で、
+ * float 演算の丸めの方が大きい。**libm の erff との max|Δ| ≤ 2e-7** を `make -C csrc erf` が守る。
+ *
+ * ⚠️ **陽性対照のためのフック。** `-DSAAN_ERF_TEST_LINEAR=1` は区間内を線形補間にする
+ *    （誤差 ~1e-4）。これが erf ゲートで**落ちること**で、しきい値が効いていると言える。
+ *    本番では定義しない（saanotts_internal.h に無い = 既定 0）。 */
+#include "erf_table.h"
+
+#ifndef SAAN_ERF_TEST_LINEAR
+#define SAAN_ERF_TEST_LINEAR 0
+#endif
+
+/* ⚠️ **陽性対照のためのフック（2 つ目。T5-G3）。** `-DSAAN_ERF_TEST_CLAMP=3.9f` はクランプの
+ *    上限をずらす。erf_test の「S3 実装との全格子 bit 一致」がこれで**落ちること**で、
+ *    その比較が効いていると言える。本番では定義しない（既定 = SAAN_ERF_XMAX）。 */
+#ifndef SAAN_ERF_TEST_CLAMP
+#define SAAN_ERF_TEST_CLAMP SAAN_ERF_XMAX
+#endif
+
+SAAN_INLINE float saan_erf_approx_inl(float x) {
+    /* T5-G3: FP の分岐を 2 つ消した（Xtensa は分岐予測を持たない）。**Hermite の式は S3 と
+     * 1 文字も変えていない。** S3 実装との bit 一致は erf_test.c の全格子チェックが守る。
+     *  (1) `|x| ≥ 4 なら ±1 を return` → ax を 4.0 にクランプして表を引く。u = 128.0 → i = 127,
+     *      t = 1.0 で Hermite 基底は (0, 0, 1, 0) を float で正確に出し、y = kSaanErfV[128]
+     *      （0.999999985 は float で 1.0f）。±1e30 も同じ経路で ±1.0f になる
+     *  (2) ~~`x < 0 ? -y : y` → 符号ビットの OR~~ **撤回**（M-87: 実機で 2 倍遅くなった。下の注記）。
+     *      分岐を消したのは (1) だけ */
+    float ax = fabsf(x);
+    ax = (ax < (float)SAAN_ERF_TEST_CLAMP) ? ax : (float)SAAN_ERF_TEST_CLAMP;
+    const float u = ax * (float)SAAN_ERF_H_INV;    /* 区間座標。整数部が区間番号 */
+    int i = (int)u;                                /* 0 .. N（ax == XMAX のとき N） */
+    if (i >= SAAN_ERF_N) i = SAAN_ERF_N - 1;       /* 整数の min。ax == XMAX なら i = N−1, t = 1 */
+    const float t = u - (float)i;                  /* [0, 1] */
+    const float f0 = kSaanErfV[i], f1 = kSaanErfV[i + 1];
+#if SAAN_ERF_TEST_LINEAR
+    const float y = f0 + t * (f1 - f0);
+#else
+    /* 導関数 × h。T5-G4 で表に事前に掛けてある（2^-5 倍は float で正確なので旧 kSaanErfD[i] * h と
+     * bit 一致。erf_test.c §3 が全 129 節点で検査する）。要素あたり乗算 2 回と定数 1 個の l32r が消える */
+    const float d0 = kSaanErfDh[i], d1 = kSaanErfDh[i + 1];
+    const float t2 = t * t, t3 = t2 * t;
+    /* Hermite 基底: h00 = 2t³−3t²+1, h10 = t³−2t²+t, h01 = −2t³+3t², h11 = t³−t² */
+    const float y = f0 * (2.0f * t3 - 3.0f * t2 + 1.0f)
+                  + d0 * (t3 - 2.0f * t2 + t)
+                  + f1 * (-2.0f * t3 + 3.0f * t2)
+                  + d1 * (t3 - t2);
+#endif
+    /* 奇関数: 符号を x から戻す。⚠️ **符号ビットの OR（memcpy 経由）にしてはいけない。** GCC 14.2 for Xtensa は
+     * FP → 整数 → FP の往復をレジスタ（rfr / wfr）ではなく**スタック経由の store → load**に落とし、
+     * 実機の GELU が 118 → 211 cyc/要素に**倍増**した（M-87。QEMU / ホストでは見えない）。
+     * 三項演算子なら neg.s + movt.s（分岐なしの条件付き代入）か短い分岐で、pie_probe E3 の 74.5 cyc/要素はこの形 */
+    return x < 0.0f ? -y : y;
+}
+
+/* erf_test.c 向けの外部ラッパ（T5-G1）。ゲートはこれを呼び、本番の GELU は上のインライン版を展開する。
+ * ⚠️ ホストではこのラッパとインライン展開が同じ bit になるかは「同じコンパイラなら」の話で、
+ *    Xtensa 側の縮約は QEMU の checksum でしか判定できない */
+float saan_erf_approx(float x) { return saan_erf_approx_inl(x); }
+
+/* PyTorch の既定は tanh 近似ではなく erf 版。erf は saan_erf_approx_inl（S3。丸め水準で erff と一致。
+ * T5-G1 でループにインライン展開 — call8 / entry / retw と wfr / rfr、定数の再ロードが消える） */
 void saan_gelu(float *x, size_t n) {
+    SAAN_PROF_BEGIN(SAAN_PROF_GELU);
     for (size_t i = 0; i < n; ++i)
-        x[i] = 0.5f * x[i] * (1.0f + erff(x[i] * 0.70710678f));
+        x[i] = 0.5f * x[i] * (1.0f + saan_erf_approx_inl(x[i] * 0.70710678f));
+    SAAN_PROF_END(SAAN_PROF_GELU);
+    SAAN_PROF_ADD(SAAN_PROF_GELU, n);
 }
 
 /* --- Duration Dα --------------------------------------------------------- */
@@ -528,7 +670,8 @@ const char *saan_strerror(saan_status s) {
     switch (s) {
     case SAAN_OK: return "ok";
     case SAAN_ERR_MAGIC: return "SAAN ヘッダでない";
-    case SAAN_ERR_VERSION: return "バージョンが違う";
+    case SAAN_ERR_VERSION: return "blob のバージョンが違う（int8 blob は v2 が要る。v1 = v0.2.0 以前のリリース。"
+                                  "scripts/export_c_weights.py で作り直すこと）";
     case SAAN_ERR_MISSING: return "必要なテンソルが無い";
     case SAAN_ERR_SHAPE: return "shape が想定と違う";
     case SAAN_ERR_ARENA: return "arena が足りない";
@@ -603,3 +746,26 @@ void saan_dwconv1d_ctx(float *y, const float *x, const float *left,
         }
     }
 }
+
+/* --- 段別プロファイラの実体（saan_prof.h。SAAN_PROFILE=1 のときだけ） ------- */
+#if SAAN_PROFILE
+uint64_t saan_prof_acc[SAAN_PROF_N];
+uint32_t saan_prof_cnt[SAAN_PROF_N];
+uint64_t saan_prof_n[SAAN_PROF_N];
+
+const char *saan_prof_name(int id) {
+    /* ⚠️ saan_prof.h の enum と同じ順序。ずれると表の行名が入れ替わる */
+    static const char *const names[SAAN_PROF_N] = {
+        "STEP", "HF", "TOKEN", "AC", "DINP", "DEC", "HEAD", "ISTFT",
+        "LOOKUP", "QUANT", "WCOPY", "MAC", "DW", "CONV32", "GELU", "LN", "RELU",
+        "PIPE", "INIT",
+    };
+    return (id >= 0 && id < SAAN_PROF_N) ? names[id] : "?";
+}
+
+void saan_prof_reset(void) {
+    memset(saan_prof_acc, 0, sizeof saan_prof_acc);
+    memset(saan_prof_cnt, 0, sizeof saan_prof_cnt);
+    memset(saan_prof_n, 0, sizeof saan_prof_n);
+}
+#endif

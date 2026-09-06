@@ -9,8 +9,8 @@
 # 中身  : components/saanotts_core/  … sanoTTS-jp/csrc からコピーした C99 推論コア
 #         main/                      … sanoTTS-jp/esp32/main からコピーしたファーム本体
 #                                       + saan_speaker.cpp（M5.Speaker 版の音声出力）
-#         model/student_i8.bin       … int8 重み blob（643,936 B）。ビルド時に
-#                                       scripts/blob_to_header.py がヘッダにする
+#         model/student_i8.bin       … int8 重み blob（**v2 形式**、654,032 B。Release v0.3.0）。
+#                                       ビルド時に scripts/blob_to_header.py がヘッダにする
 #
 # ⚠️ **本家 sanoTTS-jp とは独立してビルドできる**（相対パス参照は無い）。
 #    その代わり本家を直してもここには反映されない。乖離に注意。
@@ -35,10 +35,11 @@ cmake_minimum_required(VERSION 3.16)
 #    16 バイト境界を検査して、属性が消えたときに気づけるようにしてある。
 #
 # ⚠️ **`const` を外さないこと。** const → .rodata → flash（SRAM 消費 0）。
-#    非 const → .data → DIRAM 643,936 B で即リンク不能。
+#    非 const → .data → DIRAM 654,032 B で即リンク不能。
 #
-# **int8 の student_i8.bin (643,936 B) のみ。** fp32 blob は
+# **int8 の student_i8.bin (v2 形式、654,032 B) のみ。** fp32 blob は
 #    scripts/blob_to_header.py がビルド時に dtype を見て拒否する。
+#    v1 形式（643,936 B。Release v0.2.0 以前）はコアが起動時に SAAN_ERR_VERSION で拒む。
 if(NOT DEFINED SAAN_MODEL_BLOB)
     set(SAAN_MODEL_BLOB "${CMAKE_CURRENT_LIST_DIR}/model/student_i8.bin")
 endif()
@@ -47,8 +48,8 @@ if(NOT EXISTS "${SAAN_MODEL_BLOB}")
     message(FATAL_ERROR
         "重み blob が無い: ${SAAN_MODEL_BLOB}\n"
         "  model/student_i8.bin を置くか -DSAAN_MODEL_BLOB=<絶対パス> を渡すこと\n"
-        "  （sanoTTS-jp のリリース saanotts-jp-v3-int8.bin と同じもの。"
-        "sha256 c3b89216...）")
+        "  （sanoTTS-jp Release v0.3.0 以降の saanotts-jp-v3-int8.bin = blob v2、"
+        "sha256 2d2b8543...）")
 endif()
 
 file(SIZE "${SAAN_MODEL_BLOB}" SAAN_MODEL_BLOB_SIZE)
@@ -85,7 +86,7 @@ project(saanotts_cores3)
 
 # --- 辞書 blob を flash の `dict` パーティションに焼く ----------------------------
 #
-# 端末内漢字 G2P の辞書（sanoTTS-jp Release v0.2.0 の k1-dict-438750.bin、13,702,320 B）。
+# 端末内漢字 G2P の辞書（sanoTTS-jp Release の k1-dict-438750.bin、13,702,320 B。v0.2.0 と v0.3.0 で同一）。
 # git には入れていない: scripts/get_dict.sh で取る。
 # ⚠️ mmap して読むので app には埋めない（app が 14 MB になる）。
 # ⚠️ -DSAAN_KANJI=0 のときは焼かない（辞書も要らない）。値は components/saanotts_core が

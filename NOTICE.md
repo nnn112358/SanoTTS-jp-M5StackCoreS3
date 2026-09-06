@@ -12,8 +12,9 @@
 
 ## 2. sanoTTS-jp モデル v3 — 重み（sanoTTS-jp Model License 1.0）
 
-- `model/student_i8.bin` = GitHub Release の **`saanotts-jp-v3-int8.bin`**
-  （SHA-256 `c3b89216133fa7bee3f61ed9d8e6c7183a5dfd41b70dab194f42c20fce5b4170`）
+- `model/student_i8.bin` = GitHub Release **v0.3.0** の **`saanotts-jp-v3-int8.bin`**（blob v2 形式、654,032 B、
+  SHA-256 `2d2b8543c06b6a749f19c9918de68244409e2bb6ad1d921a90b5c358f96d4d79`）。
+  2026-09-04 までは v0.2.0 の同名資産（v1 形式、643,936 B、SHA-256 `c3b89216…`）だった。重みの値は同じで配置だけが違う
 - ライセンス: `LicenseRef-sanoTTS-jp-Model-1.0`
   （全文: [`LICENSES/sanoTTS-jp.LICENSE-MODEL.md`](LICENSES/sanoTTS-jp.LICENSE-MODEL.md)）。
   **リポジトリの MIT はモデルの重みには適用されない。**
@@ -86,7 +87,7 @@ MOE-Speech (litagin) — https://huggingface.co/spaces/litagin/moe-speech-licens
 
 ## 7. 辞書 `k1-dict-438750.bin` — 端末内の形態素解析用（修正 BSD）
 
-- sanoTTS-jp Release v0.2.0 の `k1-dict-438750.bin`（13,702,320 B、
+- sanoTTS-jp Release v0.3.0 の `k1-dict-438750.bin`（13,702,320 B、v0.2.0 と同一のファイル、
   SHA-256 `f162c922074d76817298b34d8a8fd35f7d195f38540303485a76c956b5d84877`）。
   `scripts/get_dict.sh` で取得する（git には入れていない）。
 - NAIST Japanese Dictionary（NAIST）と UniDic（The UniDic Consortium）を TTS 用に

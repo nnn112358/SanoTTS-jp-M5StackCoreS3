@@ -34,7 +34,7 @@ MIT は「無制限に (without restriction)」の利用を認めます。しか
 | ファイル | 内容 |
 |---|---|
 | `saanotts-jp-v3-stage4.pt` | PyTorch checkpoint（fp32、3 つの生徒モデル） |
-| `saanotts-jp-v3-int8.bin` | C99 コア用 int8 重みブロブ（SAAN v1 形式） |
+| `saanotts-jp-v3-int8.bin` | C99 コア用 int8 重みブロブ（SAAN 形式。v0.2.0 の資産は v1、2026-09-02 以降のコアは v2 を読む） |
 | `saanotts-jp-v3-fp32.bin` | 同 fp32 版 |
 | `golden-v3-fp32.bin` / `golden-v3-int8.bin` | 移植検証用のゴールデン中間出力 |
 | `samples/*.wav` | 本モデルが生成した音声サンプル |
@@ -42,6 +42,12 @@ MIT は「無制限に (without restriction)」の利用を認めます。しか
 
 本モデルから派生したもの（ファインチューン、量子化、変換、蒸留の結果を含む）、
 および**本モデルが生成した音声**にも、本ライセンスの条件が及びます。
+
+⚠️ **自分でビルドした firmware にも重みが入ります。** `esp32/` も
+`esp32/boards/m5unified/`（M5Stack）も、int8 blob を**パーティションまたは `.rodata`**
+としてイメージに埋め込みます。配布するなら §3 の義務に加えて、
+[`NOTICE.md`](NOTICE.md) の第三者コード（Open JTalk / M5Unified / M5GFX / IPA フォント /
+辞書）の表示も要ります。
 
 ## 2. 許諾
 
