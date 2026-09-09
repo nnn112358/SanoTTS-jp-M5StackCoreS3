@@ -7,6 +7,9 @@ CMakeLists.txt              PIE 既定 ON、blob のパス、COMPONENTS=main、�
 partitions.csv              16 MB flash / factory 2 MB / dict 14.6 MB（重みは app の .rodata に入る）
 sdkconfig.defaults          CoreS3（Quad PSRAM / USB Serial-JTAG / QIO / D-cache 64 KB・64 B 行）+ sanoTTS 向け設定
 idf.sh                      ESP-IDF v5.5.5 をクリーンな環境で有効化して idf.py を呼ぶ
+idf_board.sh                ボードを選んで idf.py を呼ぶ（cores3 | atoms3 | atoms3r | core2。build_<ボード>/ に分ける）
+sdkconfig.atoms3 / .atoms3r / .core2   ボードごとの上書き（defaults に重ねる）。partitions_atoms3.csv / partitions_core2.csv も
+scripts/make_images.sh      板 × 辞書の一括イメージを firmware/<日付>_images/ に作る
 components/saanotts_core/   sanoTTS-jp csrc のコピー（origin/main d169e91、2026-09-04）
   saanotts*.c fft.c         C99 推論コア（4 ファイル）。saan_prof.h（段別プロファイラ）、erf_table.h（GELU の表）
   g2p.c line.c              端末側かな G2P（saan_g2p_classify で経路判定も）と行編集
@@ -18,10 +21,11 @@ components/saanotts_core/   sanoTTS-jp csrc のコピー（origin/main d169e91�
 main/
   main.c                    起動 → セルフテスト → 表示 → 発話 → 入力/タッチのループ（経路判定は speak_auto）
   saan_model.{c,h}          .rodata の重み blob を開く（v2 でないと SAAN_ERR_VERSION）
-  saan_speaker.{h,cpp}      M5.Speaker 出力（22.05 kHz 直接。先読み自動 / 貯めて再生。PCM 統計もここ）
+  saan_speaker.{h,cpp}      M5.Speaker 出力（22.05 kHz 直接。プリロール + 3 枚リング = 本家 M5 実装と同じ。PCM 統計とリップシンク包絡もここ）
   saan_ui.h                 画面とタッチの API（実装は -DSAAN_UI=avatar|text で選ぶ）
   saan_ui_avatar.cpp        顔（m5stack-avatar）+ 吹き出し + リップシンク（既定）
   saan_ui_text.cpp          文字だけ（M5GFX。文 / 出典 / ステータス。avatar をリンクしない）
+  saan_ui_atoms3.cpp        ATOMS3 の 128 x 128 文字表示 + 本体ボタン（-DSAAN_BOARD=atoms3 で選ばれる）
   saan_console.{c,h}        シリアル `かな> ` 入力（タイムアウト付き poll。本家のコピー）
   saan_dict.{c,h}           辞書パーティションを貼る（本家のコピー。ROM_IMPL=y なら esp_mmu_map）
   saan_kanji.{c,h}          漢字文 → 音素 ID（本家のコピー。作業領域は合成 arena を借りる）
@@ -48,8 +52,9 @@ NOTICE.md  LICENSES/        帰属表示とライセンス全文
   v1（旧 Release）はコアが `SAAN_ERR_VERSION` で拒む
 - 1 発話の流れ（`main.c` の `synth_once`）: 静的 arena **176 KB**（本家 T4 で 208 KB から下げた）で
   `saan_stream_init` → `a.used` を `saan_stream_arena_used(n_ids)` と突き合わせる（黙って確保に
-  失敗していないか）→ チャンクを pull して int16 へ → 先読み量まで貯めてから鳴らし始める、または
-  貯めて再生（全チャンクを PSRAM に貯めてから 1 回の `playRaw`）
+  失敗していないか）→ 4 チャンクをプリロール → `saan_speaker_start()` → 以後チャンクごとに
+  `saan_speaker_write_f32()`（M5 のキューが満杯ならブロック）。`-DSAAN_BUFFERED=1` なら
+  全チャンクを PSRAM に貯めてから 1 回の `playRaw`
 
 ## 入力仕様
 
@@ -93,17 +98,17 @@ NOTICE.md  LICENSES/        帰属表示とライセンス全文
 
 ## 途切れない再生の条件
 
-ストリーミングで途切れない条件は **`プリロール P ≥ 音声長 T × (1 − 1/xRT)`**（時刻 t での貯まり P + t/xRT が
-再生位置 t を常に上回る。最も厳しいのは t = T）。
-xRT = 1.55 なら音声の **35.5%** を先に貯めれば以後は追い越されない。
-⚠️ かつて「61%（P ≥ xRT·T/(1+xRT)）」と書いたが**誤り**。あれは「残りの合成が先読みぶんの
-再生中に終わる」という強すぎる条件で、再生中も合成が進むことを勘定していなかった。
-既定はこの先読み量（前の発話の実測 xRT × 1.15 + 2 チャンク）で計算しながら鳴らす。
-`-DSAAN_BUFFERED=1` は全部貯めてから鳴らす（待ち ≒ 音声長 × xRT + 初回 pull）。
+**2026-09-10 に給餌方式を本家の M5 実装と同じにした**（次の「再生パイプライン」）。この方式では
+合成は M5 のキュー（2 枚）より先に進めないので、**途切れない条件は xRT < 1**（1 チャンクの合成が
+そのチャンクの音声長より短い）。プリロール（4 チャンク = 371 ms）は初回 pull の遅れを吸収するだけで、
+合成が遅いときの貯金にはならない。xRT > 1 なら `-DSAAN_BUFFERED=1`（全部貯めてから鳴らす）。
 
-**2026-09-04 のコア同期後は xRT < 1 の見込み**（本家 CoreS3 顔なしで 0.446）。そのとき式の
-(1 − 1/xRT) は負なので 0 に切り、先読みは **2 チャンク（4,096 sample = 186 ms）だけ**になる。
-最初の発話の見込み値 `SAAN_XRT_INITIAL` は 1.2（旧 1.8）に下げた。実測して外れていたら直す。
+2026-09-07 の実測で顔ありの既定ビルドは定常 xRT 0.445 なので、条件は十分に満たしている。
+
+履歴: 2026-09-04 の同期前は xRT 1.55 で再生に追いつかず、「プリロール P ≥ 音声長 T × (1 − 1/xRT)」
+（時刻 t での貯まり P + t/xRT が再生位置 t を常に上回る）から前の発話の実測 xRT で先読み量を決め、
+発話バッファ 1 本を 2 区間で渡す方式にしていた。xRT < 1 になってその仕組みは要らなくなったので、
+本家に合わせて外した（⚠️ かつて「61%（P ≥ xRT·T/(1+xRT)）」と書いたのは**誤り**だった）。
 
 ## 顔とリップシンク（m5stack-avatar）
 
@@ -144,29 +149,30 @@ REQUIRES から外すので描画タスクもリップシンクも無く、合�
   （`xTaskCreateUniversal` → `xTaskCreatePinnedToCore`、`random(long)` の補い、
   本家の `-Wreorder/-Wswitch` 警告をそのコンポーネントだけエラーにしない）
 
-## 再生パイプライン（先読み量の自動決定）
+## 再生パイプライン（本家 boards/m5unified の saan_audio_m5.cpp と同じ）
 
-1 発話は PSRAM の連続バッファ 1 本に頭から追記する（`saan_speaker_push_f32`）。
-先読み量まで貯まったら `saan_speaker_start()` が **2 区間**をキューに渡す:
-1 枚目 = 貯めたぶん、2 枚目 = **残り全部（まだ書いていない部分を含む）**。
-M5.Speaker は DMA へ詰めるときにその場所のメモリを読むので、合成が再生より先を書き続けている限り
-（= 先読み量の条件）2 枚目はそのまま正しく鳴る。以後「渡す」作業は無く、合成は書き続けるだけ。
+- **プリロール**: 発話ごとに `SAAN_SPK_PREROLL_SAMPLES`（8,192 sample = 4 チャンク）ぶんのバッファを
+  PSRAM に取り（`saan_speaker_begin_utterance`）、変換して貯める（`saan_speaker_preroll_push`）。
+  `saan_speaker_start()` がそれを 1 回の `playRaw` で渡す
+- **定常**: 2,048 sample × 3 枚のリング（起動時に確保、解放しない）。チャンクごとに変換して
+  `playRaw`（`saan_speaker_write_f32`）。M5 のキュー（1 ch あたり `wav_info_t wavinfo[2]`）が満杯なら
+  `_set_next_wav` がセマフォ待ちで**ブロック**するので、合成ループの流量制御はこれに任せる。
+  生きているポインタは最大 2 本（current + next）なので 3 枚あれば書き込み先は必ず再生済み
+- **停止**: `saan_speaker_stop()` が `isPlaying()` が 0 になるまで待ってからプリロールを解放する
+  （`playRaw` はポインタを持つだけなので、先に free すると解放済みメモリを鳴らす）
 
 ```
-pull → push（int16 化 + 包絡）─┬─ 貯まり < 先読み量 … まだ鳴らさない
-                              └─ 貯まり ≥ 先読み量 … start()（貯めたぶん + 残り全部の 2 区間を渡す）
-以後 毎チャンク pump() = 「再生位置 + DMA 先読み 2,048 sample > 書き込み位置」なら追い越し
+pull × 4 → preroll_push（int16 化 + 包絡）→ start()（貯めたぶんを 1 回で渡す）
+以後 pull → write_f32（リングに変換 → playRaw。満杯ならブロック）
 eos → stop()（再生完了を待って解放）
 ```
 
-- 先読み量 = `T × (1 − 1/xRT_est) + 2 チャンク`（DMA の先読み 93 ms と粒度のぶん）。
-  `xRT_est` は前の発話の実測 × 1.15（最初は 1.8）。追い越されたら次は更に × 1.2
-- バッファは `begin_utterance` で**ゼロ埋め**する。追い越された区間はゴミではなく無音になる
-- `-DSAAN_BUFFERED=1` は先読み量 = 全部（発話開始まで = 合成時間）
-- ⚠️ **「キューに空きができたら続きを渡す」方式は途切れる。** チャンクを 1 個合成するたび
-  （154 ms ごと）にしか渡せないので、渡した瞬間にキューが 2 枚とも埋まっていると、次の機会までに
-  2 枚とも尽きる組み合わせが必ずある（残り 154〜215 ms のとき。実機で 1 発話目に毎回 1 回踏んだ）。
-  閾値をいじっても穴が移動するだけなので、渡すタイミングという概念を無くした
+- アンダーランの定義は本家と同じ「pull の計算時間 > そのチャンクの音声長」（ログの `アンダーラン N 回`）
+- `-DSAAN_BUFFERED=1` はプリロール = 発話全体（発話開始まで = 合成時間、途切れない）
+- 以前の方式（発話バッファ 1 本を「貯めたぶん + 残り全部」の 2 区間で渡し、`pump()` で追い越しを
+  監視する）は 2026-09-10 に外した。**「キューに空きができたら続きを渡す」ポーリング方式は
+  途切れる**（渡した瞬間に 2 枚とも埋まっていると次の機会までに尽きる）が、本家の方式は playRaw の
+  **ブロック**で空いた瞬間に渡すので、その穴は無い
 
 ## 端末内漢字 G2P（sanoTTS-jp K トラックの取り込み）
 

@@ -1,0 +1,12 @@
+# sanoTTS-jp / M5Stack Core2 のパーティション表（16 MB flash、端末内漢字 G2P つき、**ESP32**）
+#
+# 配置は CoreS3 の partitions.csv と同じで、dict だけ 3 MB に縮めてある。
+# ESP32 は flash を mmap できる窓（DROM）が 4 MB しかなく、app の .rodata と辞書が同じ窓を使う。
+# k1-dict-44000-2mb.bin（977,456 B）は入る。k1-dict-135000-4mb.bin（3,006,656 B）はパーティションには
+# 入るが、mmap の窓に入るかは実機で確かめること（saan_dict の esp_partition_mmap が失敗すれば無理）。
+#
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+factory,  app,  factory, 0x10000,  0x200000,
+dict,     data, 0x41,    0x210000, 0x2F0000,

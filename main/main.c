@@ -16,18 +16,22 @@
  *
  * 1 発話の中身（synth_once）:
  *   静的 arena で saan_stream_init
- *     → チャンクを pull して int16 に変換し、PSRAM の発話バッファに**追記**
- *     → 先読み量（下の preroll_target）まで貯まったら鳴らし始め、以後は
- *        M5 のキューに空きがあるたびに続きの区間を渡す（**計算しながら鳴らす**）
- *     → 統計（xRT / 途切れ / checksum）をログに出し、次の発話の先読み量に xRT を反映
+ *     → **プリロール**: SAAN_SPK_PREROLL_SAMPLES（4 チャンク）ぶんを pull して int16 に変換し、貯める
+ *     → saan_speaker_start() で貯めたぶんを渡して鳴らし始め、以後はチャンクごとに
+ *        saan_speaker_write_f32()（M5 のキューが満杯なら**ブロック**する。**計算しながら鳴らす**）
+ *     → 統計（xRT / アンダーラン / checksum）をログに出す
+ *   この流れは本家 sanoTTS-jp の esp32/main/main.c と同じ（2026-09-10 に合わせた。それ以前は
+ *   前の発話の xRT から先読み量を決め、発話バッファ 1 本を 2 区間で渡していた）。
  *
  * ⚠️ **速度の現在地（2026-09-04 に本家 origin/main のコアへ同期）。**
  *    旧コア（2026-09-01 時点）は CoreS3 実機で W8A8+PIE 定常 1.55x RT だった（docs/measurements.md）。
- *    本家はその後 S1〜S5b / T1〜T5 で **CoreS3（顔なし）定常 xRT 0.446**（本家 M-90）まで詰めた。
- *    **このリポジトリ（顔あり）での再測定はまだ**。xRT < 1 なら先読みは 2 チャンクで済み、
- *    途切れない条件「音声の (1 − 1/xRT) を先に貯める」は自動的に 0 になる。
+ *    本家はその後 S1〜S5b / T1〜T5 で **CoreS3（顔なし）定常 xRT 0.446**（本家 M-90）まで詰め、
+ *    この板（顔あり）でも 2026-09-07 に 0.445 を実測した。xRT < 1 なので固定プリロールで途切れない。
+ *    ⚠️ xRT > 1 に戻ったら（コアを重くしたら）この方式では**プリロールを増やしても途切れる**
+ *    （合成はキューの 2 枚より先に進めない）。そのときは -DSAAN_BUFFERED=1。
  */
 #include <inttypes.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -65,50 +69,26 @@ static const char *TAG = "saanotts";
 #define SAAN_BOOT_SPEAK 1
 #endif
 
-/* 1 = 全部貯めてから鳴らす（先読み量の計算を使わない。発話開始まで = 合成時間）。
- * 0 = **xRT から先読み量を決めて、計算しながら鳴らす**（既定）。 */
 /* 端末内漢字 G2P を入れるか（CMake の -DSAAN_KANJI=0 で外す。既定 1）。
  * 外すと入力はかな中間表現だけになり、辞書パーティションも要らない。 */
 #ifndef SAAN_KANJI
 #define SAAN_KANJI 0
 #endif
 
+/* 1 = 全部貯めてから鳴らす（発話開始まで = 合成時間。**途切れない**）。
+ * 0 = **プリロール後に計算しながら鳴らす**（既定。xRT とアンダーランを測るのはこちら）。 */
 #ifndef SAAN_BUFFERED
 #define SAAN_BUFFERED 0
 #endif
 
-/* --- 先読み量 -------------------------------------------------------------
+/* --- プリロール -----------------------------------------------------------
  *
- * 音声長 T、合成の実時間比 xRT（> 1 = 再生より遅い）のとき、鳴らし始める前に
- * 貯めておく量 P が **P ≥ T·(1 − 1/xRT)** なら、以後は計算が再生に追い越されない
- * （時刻 t での貯まり P + t/xRT が再生位置 t を常に上回る。最も厳しいのは t = T）。
- *
- * xRT は前の発話で実測した値に余裕（SAAN_XRT_MARGIN）を掛けて使う。最初の発話は
- * SAAN_XRT_INITIAL。さらに 2 チャンクぶん（DMA の先読み + 粒度）を足す。
- * ⚠️ 見込みが甘いと途切れる（`途切れ N 回` に出る）。次の発話で xRT が更新されて直る。
- * 初期値 0.6 は実測から（2026-09-07、顔あり既定ビルドで定常 xRT 0.443〜0.445。余裕 35%）。
- *    1.0 未満なら先読みは 2 チャンクだけになり、発話開始は「初回 pull + 1 チャンク」≒ 330 ms。
- *    旧コアでは 1.8、同期直後の未測定の見込みは 1.2（1 発話目だけ 475 ms かかっていた）。
- *    外れても 2 発話目からは実測値で上書きされる。 */
-#ifndef SAAN_XRT_INITIAL
-#define SAAN_XRT_INITIAL 0.6f
-#endif
-#ifndef SAAN_XRT_MARGIN
-#define SAAN_XRT_MARGIN 1.15f
-#endif
-static float g_xrt_est = SAAN_XRT_INITIAL;
-
-static size_t preroll_target(size_t total) {
-#if SAAN_BUFFERED
-    return total;
-#else
-    const float x = g_xrt_est;
-    const float ratio = x > 1.0f ? 1.0f - 1.0f / x : 0.0f;
-    /* + 2 チャンク: M5.Speaker の DMA 先読み（2,048 sample）と、チャンク単位の粒度のぶん */
-    size_t p = (size_t)((float)total * ratio) + (size_t)(2 * SAAN_CHUNK * SAAN_HOP);
-    return p > total ? total : p;
-#endif
-}
+ * 本家と同じ固定量（SAAN_SPK_PREROLL_SAMPLES = 8,192 sample = 4 チャンク = 371 ms）。
+ * 最初の pull だけ定常の約 6 倍かかる（この板で 244.65 ms vs 41.47 ms）ので、
+ * 鳴らし始める前にそのぶんを含めて数チャンク計算しておく。
+ * ⚠️ 途切れない条件は **xRT < 1**。プリロールは初回 pull の遅れを吸収するだけで、
+ *    合成が遅いときの貯金にはならない（キューの 2 枚より先には進めない）。 */
+#define SAAN_PREROLL_CHUNKS (SAAN_SPK_PREROLL_SAMPLES / (SAAN_CHUNK * SAAN_HOP))
 
 /* --- arena ---------------------------------------------------------------
  *
@@ -159,9 +139,21 @@ typedef char saan_arena_holds_kanji_workbytes[
  * 黙って出すより良い。** */
 #define SAAN_MAX_IDS 350
 
-/* .bss に静的確保する。**malloc しない**（断片化させない・失敗しない）。
- * 16 バイト境界は PIE（SOC_SIMD_PREFERRED_DATA_ALIGNMENT = 16）のため。 */
+/* 既定は .bss に静的確保する。**malloc しない**（断片化させない・失敗しない）。
+ * 16 バイト境界は PIE（SOC_SIMD_PREFERRED_DATA_ALIGNMENT = 16）のため。
+ *
+ * ⚠️ **ESP32（S3 でない Core2）は dram0_0_seg が小さく、静的 176 KB が入らない**
+ *    （本家の Core2 で 65,368 B 溢れた）。SAAN_BOARD=core2 は SAAN_ARENA_HEAP=1 になり
+ *    （main/CMakeLists.txt）、tts_task の先頭で heap_caps_aligned_alloc（PSRAM 優先 → 内部 DRAM）
+ *    から取る。**PSRAM の arena は遅い**（未測定）。取れなければ起動時に止まる。本家と同じ経路。 */
+#ifndef SAAN_ARENA_HEAP
+#define SAAN_ARENA_HEAP 0
+#endif
+#if SAAN_ARENA_HEAP
+static uint8_t *g_arena;   /* tts_task の先頭で確保。16 B 境界は heap_caps_aligned_alloc が保証 */
+#else
 static __attribute__((aligned(16))) uint8_t g_arena[SAAN_ARENA_BYTES];
+#endif
 
 /* 1 チャンク = 8 frames × 256 = 2,048 sample = 92.88 ms。8,192 B。
  * ⚠️ **スタックに置かない。** saan_irfft_1024 の自動変数だけで 4 KB 使う。 */
@@ -280,7 +272,7 @@ static bool synth_once(const saan_weights *w, const int32_t *ids, int32_t n_ids)
     const int64_t t_begin = esp_timer_get_time();
 
     saan_arena a;
-    saan_arena_init(&a, g_arena, sizeof g_arena);
+    saan_arena_init(&a, g_arena, SAAN_ARENA_BYTES);
 
     saan_stream st;
     int64_t t_init = esp_timer_get_time();
@@ -310,60 +302,80 @@ static bool synth_once(const saan_weights *w, const int32_t *ids, int32_t n_ids)
     ESP_LOGI(TAG, "init %.2f ms / %d ids / %d frames / %u sample / 音声 %.3f s",
              (double)t_init / 1000.0, (int)n_ids, (int)st.n_frames, (unsigned)total, audio_s);
     ESP_LOGI(TAG, "arena used %u B / peak %u B / 確保 %u B",
-             (unsigned)a.used, (unsigned)a.peak, (unsigned)sizeof g_arena);
+             (unsigned)a.used, (unsigned)a.peak, (unsigned)SAAN_ARENA_BYTES);
 
-    /* 発話の総サンプル数は init の時点で決まる。そのぶん PSRAM に取る */
-    if (!saan_speaker_begin_utterance(total)) return false;
-    const size_t target = preroll_target(total);
-    ESP_LOGI(TAG, "先読み %u / %u sample (%.0f%%) — xRT 見込み %.2f",
-             (unsigned)target, (unsigned)total, 100.0 * (double)target / (double)total,
-             (double)g_xrt_est);
+    /* --- プリロール ------------------------------------------------------
+     * ⚠️ **鳴らし始める前に数チャンク計算しておく。** 最初の pull だけ定常の約 6 倍かかる
+     *    （旧コアの CoreS3 実測 766 ms vs 144 ms、新コアの実測 244.65 ms vs 41.47 ms。
+     *    受容野 38 フレームの warmup で内部の step_chunk が複数回走るため）。 */
+#if SAAN_BUFFERED
+    /* 発話の総サンプル数は init の時点で決まる。そのぶん貯めて全部計算してから鳴らす */
+    const size_t preroll = total;
+    const int preroll_chunks = INT_MAX;   /* = 最後まで */
+#else
+    const size_t preroll = total < (size_t)SAAN_SPK_PREROLL_SAMPLES ? total : (size_t)SAAN_SPK_PREROLL_SAMPLES;
+    const int preroll_chunks = SAAN_PREROLL_CHUNKS;
+#endif
+    /* プリロールバッファ（preroll）とリップシンク包絡（total ぶん）を PSRAM に取る */
+    if (!saan_speaker_begin_utterance(preroll, total)) return false;
 
     int32_t n = 0;
-    int chunks = 0, short_pulls = 0, gaps = 0;
+    int chunks = 0, short_pulls = 0, underruns = 0;
     int64_t t_first = 0, t_rest = 0;
-    double t_ready_ms = 0.0;   /* 鳴らし始めまでの時間 */
     int32_t total_frames = 0;
-    bool started = false;
+    double t_ready_ms = 0.0;   /* 鳴らし始めまでの時間（goto done で飛ぶ経路があるのでここで初期化） */
+    bool eos = false;
     bool ok = true;
 
-    /* --- 合成しながら鳴らす -----------------------------------------------
-     * ⚠️ 最初の pull だけ定常の約 6 倍かかる（旧コアの CoreS3 実測 766 ms vs 144 ms、
-     *    本家新コアの CoreS3 実測 244.65 ms vs 41.47 ms。受容野 38 フレームの warmup で
-     *    内部の step_chunk が複数回走るため）。先読み量の判定より前なので発話開始を遅らせるだけ。 */
-    for (;;) {
+    for (int i = 0; i < preroll_chunks && !eos; ++i) {
+        int64_t t0 = esp_timer_get_time();
+        s = saan_stream_pull(&st, g_chunk, &n);
+        int64_t dt = esp_timer_get_time() - t0;
+        if (s != SAAN_OK) { ESP_LOGE(TAG, "pull: %s", saan_strerror(s)); ok = false; goto done; }
+        if (n <= 0) { eos = true; break; }
+        if (chunks == 0) t_first = dt; else t_rest += dt;
+        if (n < SAAN_CHUNK) ++short_pulls;
+        total_frames += n; ++chunks;
+        /* ⚠️ `n` は**フレーム数**。サンプル数は n * SAAN_HOP */
+        if (!saan_speaker_preroll_push(g_chunk, (size_t)n * SAAN_HOP)) {
+            ESP_LOGE(TAG, "プリロール容量の計算が合っていない。SAAN_SPK_PREROLL_SAMPLES を見直すこと");
+            ok = false; goto done;
+        }
+    }
+    t_ready_ms = (double)(esp_timer_get_time() - t_begin) / 1000.0;
+#if SAAN_BUFFERED
+    ESP_LOGI(TAG, "全 %d チャンクを貯めた。発話開始まで %.0f ms（音声 %.3f s）",
+             chunks, t_ready_ms, audio_s);
+#else
+    ESP_LOGI(TAG, "プリロール %d チャンク完了（初回 pull %.2f ms / 鳴らし始めまで %.0f ms）",
+             chunks, (double)t_first / 1000.0, t_ready_ms);
+#endif
+
+    saan_ui_speaking();   /* 吹き出しに文を出す。口は lip_task が動かす */
+    if (!saan_speaker_start()) { ok = false; goto done; }
+
+    /* --- 定常ループ（ストリーミングのみ。貯める方式では eos 済みで入らない）------
+     * write_f32 は M5 のキュー（2 枚）が満杯なら空くまでブロックする。渡すタイミングを
+     * 見る必要は無い。 */
+    while (!eos) {
         int64_t t0 = esp_timer_get_time();
         s = saan_stream_pull(&st, g_chunk, &n);
         int64_t dt = esp_timer_get_time() - t0;
         if (s != SAAN_OK) { ESP_LOGE(TAG, "pull: %s", saan_strerror(s)); ok = false; break; }
         if (n <= 0) break;
+
+        /* ⚠️ **これが実機で最初に見るべき数値。** 1 チャンクの計算に、
+         *    そのチャンクが表す音声より長くかかったらアンダーラン（本家と同じ定義）。 */
+        int64_t budget_us = (int64_t)n * SAAN_HOP * 1000000 / SAAN_SR;
+        if (dt > budget_us) ++underruns;
         if (chunks == 0) t_first = dt; else t_rest += dt;
         if (n < SAAN_CHUNK) ++short_pulls;
         total_frames += n; ++chunks;
 
-        /* ⚠️ `n` は**フレーム数**。サンプル数は n * SAAN_HOP */
-        if (!saan_speaker_push_f32(g_chunk, (size_t)n * SAAN_HOP)) { ok = false; break; }
-
-        if (!started) {
-            if (saan_speaker_buffered() >= target) {
-                t_ready_ms = (double)(esp_timer_get_time() - t_begin) / 1000.0;
-                saan_ui_speaking();   /* 吹き出しに文を出す。口は lip_task が動かす */
-                if (!saan_speaker_start()) { ok = false; break; }
-                started = true;
-            }
-        } else if (saan_speaker_pump(false)) {   /* 再生に追い越されたか */
-            ++gaps;   /* 追い越された = その区間は無音が鳴った */
-        }
+        if (!saan_speaker_write_f32(g_chunk, (size_t)n * SAAN_HOP)) { ok = false; break; }
     }
-    if (ok && !started) {
-        /* 先読み量が総量に届かないうちに終わった（短い文 / 全部貯める設定） */
-        t_ready_ms = (double)(esp_timer_get_time() - t_begin) / 1000.0;
-        saan_ui_speaking();
-        if (!saan_speaker_start()) ok = false;
-        started = true;
-    }
-    if (ok && saan_speaker_pump(true)) ++gaps;
 
+done:
     saan_speaker_stop();
     {
         const double total_audio = (double)total_frames * SAAN_HOP / SAAN_SR;
@@ -378,14 +390,14 @@ static bool synth_once(const saan_weights *w, const int32_t *ids, int32_t n_ids)
                       "(満チャンク 1 個 = %.2f ms の音声)",
                  (double)t_first / 1000.0, mean_rest, chunk_ms);
         /* ⚠️ この「定常 xRT」は 2 回目以降の全 pull の平均（末尾の端数 pull 込み）。本家 T1 以降の
-         *    定義（満チャンク pull の中央値）とは違い、少し大きめに出る。先読み量の見込みには
-         *    大きめのほうが安全なのでこのまま。**版どうしを比べるなら次の「合成合計 / 音声」**
+         *    定義（満チャンク pull の中央値）とは違い、少し大きめに出る。
+         *    **版どうしを比べるなら次の「合成合計 / 音声」**
          *    （定義に依らない量）を見ること。 */
         ESP_LOGI(TAG, "定常 xRT = %.3f  ← **1.0 を超えたら再生より遅い**", xrt);
         ESP_LOGI(TAG, "合成合計 %.2f ms（全 pull の dt の和）/ 音声 %.3f s → 合成/音声 %.3f",
                  total_ms, total_audio, total_audio > 0 ? total_ms / 1000.0 / total_audio : 0.0);
-        ESP_LOGI(TAG, "発話開始まで %.0f ms（先読み %u sample）/ 追い越し %d 回",
-                 t_ready_ms, (unsigned)target, gaps);
+        ESP_LOGI(TAG, "発話開始まで %.0f ms（プリロール %u sample）/ アンダーラン %d 回",
+                 t_ready_ms, (unsigned)preroll, underruns);
         ESP_LOGI(TAG, "int16 クリップ %u sample", (unsigned)saan_speaker_clip_count());
         /* ⚠️ **移植が正しいことの唯一の機械的な証拠。** 「音が鳴った」ではなく、
          *    本家 QEMU の記録値と一致するかで判定する。checksum が違っても |max| と Σx² が合えば丸め差。
@@ -412,21 +424,14 @@ static bool synth_once(const saan_weights *w, const int32_t *ids, int32_t n_ids)
                          (unsigned)lf, (unsigned)lo, (double)lm);
         }
 
-        /* 次の発話の先読み量に反映する（2 チャンク以上で測れたときだけ）。
-         * 途切れたなら見込みが甘かったので、実測より更に厚めにする */
-        if (chunks > 2 && xrt > 0.0) {
-            float est = (float)xrt * SAAN_XRT_MARGIN * (gaps > 0 ? 1.2f : 1.0f);
-            if (est < 0.3f) est = 0.3f;
-            if (est > 10.0f) est = 10.0f;
-            g_xrt_est = est;
-        }
-        if (gaps > 0)
-            ESP_LOGW(TAG, "途切れた。次の発話は xRT 見込み %.2f で先読みを増やす", (double)g_xrt_est);
+        if (underruns > 0)
+            ESP_LOGW(TAG, "アンダーラン %d 回（pull の計算時間 > そのチャンクの音声長）。"
+                          "途切れない再生が要るなら -DSAAN_BUFFERED=1", underruns);
 #if SAAN_PROFILE
         prof_report();
 #endif
 
-        saan_ui_idle(gaps > 0 ? "途切れた" : "タッチでもう一度");
+        saan_ui_idle(underruns > 0 ? "途切れた" : "タッチでもう一度");
     }
     return ok;
 }
@@ -532,7 +537,7 @@ static bool speak_kanji(const saan_weights *w, const char *text, size_t nbytes) 
     int n_tok = 0;
     int64_t t0 = esp_timer_get_time();
     saan_kanji_status ks = saan_kanji_to_ids(&g_dict, text, nbytes,
-                                            g_arena, sizeof g_arena,
+                                            g_arena, SAAN_ARENA_BYTES,
                                             g_ids, SAAN_G2P_IDS_CAP, &n_ids, &n_tok);
     int64_t dt = esp_timer_get_time() - t0;
     if (ks != SAAN_KANJI_OK) {
@@ -683,6 +688,22 @@ static void print_usage(void) {
 
 static void tts_task(void *arg) {
     (void)arg;
+#if SAAN_ARENA_HEAP
+    g_arena = (uint8_t *)heap_caps_aligned_alloc(16, SAAN_ARENA_BYTES,
+                                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (g_arena) {
+        ESP_LOGW(TAG, "arena %d B を **PSRAM** に確保 (%p)。合成は遅くなる（速度の測定には使わない）",
+                 (int)SAAN_ARENA_BYTES, (void *)g_arena);
+    } else {
+        g_arena = (uint8_t *)heap_caps_aligned_alloc(16, SAAN_ARENA_BYTES,
+                                                     MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!g_arena) {
+            ESP_LOGE(TAG, "arena %d B を確保できない（PSRAM も内部 DRAM も）", (int)SAAN_ARENA_BYTES);
+            vTaskDelete(NULL); return;
+        }
+        ESP_LOGI(TAG, "arena %d B を内部 DRAM のヒープに確保 (%p)", (int)SAAN_ARENA_BYTES, (void *)g_arena);
+    }
+#endif
     log_heap("起動直後");
     log_mmap_room();
     ESP_LOGI(TAG, "arena %d B を .bss に静的確保 (%p) / G2P の ids %d B",

@@ -3,21 +3,23 @@
  * 22.05 kHz / 16 bit / mono。実装は saan_speaker.cpp（C++）。main.c は C のままなので
  * ここは extern "C" で公開する。
  *
+ * 給餌の仕組みは本家 sanoTTS-jp の esp32/boards/m5unified/main/saan_audio_m5.cpp と同じ
+ * （2026-09-10 に合わせた）:
+ *   - プリロール（鳴らし始める前に貯めるぶん）は発話ごとに 1 本のバッファ（PSRAM 優先）
+ *   - 鳴らし始めた後は **2,048 sample × 3 枚のリング**に変換して、チャンクごとに playRaw
+ *   - M5 のキュー（1 ch あたり 2 枚）が満杯なら playRaw が**ブロック**する。合成ループの
+ *     流量制御はこれに任せる（「空きを見て渡す」タイミングという概念は無い）
+ *
  * サンプルレートはコアと同じ **22,050 Hz** で I2S を回す（M5 側のリサンプル無し）。
  *    AW88298 は 22.05 kHz を対応レートとして持つ（レジスタ 0x06 I2SSR）。ただし
  *    ESP32-S3 に APLL は無く、**実サンプルレートの誤差は未測定。**
  *
- * 1 発話は **PSRAM の連続バッファ 1 本**に頭から書く。鳴らし始めるときに「貯めたぶん」と
- * 「残り全部（まだ書いていない部分を含む）」の 2 区間をキューに渡し、以後は書き続けるだけ。
- * 先に何サンプル貯めてから鳴らし始めるかは呼び出し側（main.c）が xRT から決める。
- *
- *   saan_speaker_setup()                    M5 を初期化する（まだ鳴らさない）
- *   saan_speaker_begin_utterance(total)     発話ぶんのバッファと包絡を取る
- *   saan_speaker_push_f32() を繰り返す       変換して貯める（まだ鳴らさない）
- *   saan_speaker_start()                    貯めたぶんを鳴らし始める（呼び出し側が時機を決める）
- *   saan_speaker_pump(false) を繰り返す      再生が書き込みを追い越していないか見る（渡す作業は無い）
- *   saan_speaker_pump(true)                 同上（互換のため残してある）
- *   saan_speaker_stop()                     鳴らし終わるまで待ち、バッファを解放
+ *   saan_speaker_setup()                          M5 を初期化し、リングを確保する（まだ鳴らさない）
+ *   saan_speaker_begin_utterance(preroll, total)  プリロールバッファとリップシンク包絡を取る
+ *   saan_speaker_preroll_push() を数回             変換して貯める（まだ鳴らさない）
+ *   saan_speaker_start()                          鳴らし始め、貯めたぶんを 1 回の playRaw で渡す
+ *   saan_speaker_write_f32() を繰り返す            変換してチャンクごとに渡す（満杯ならブロック）
+ *   saan_speaker_stop()                           鳴らし終わるまで待ち、プリロールを解放
  *
  * リップシンク: 変換のたびに 256 sample（11.6 ms）ごとの RMS を包絡として貯め、
  *   鳴らし始めた時刻から「いま鳴っているサンプル位置」を推定して
@@ -35,37 +37,46 @@
 extern "C" {
 #endif
 
+/* ストリーミング時にプリロールするサンプル数。本家と同じ既定 8,192 = 4 チャンク = 371 ms・16 KB。
+ *
+ * なぜ要るか: **最初の saan_stream_pull だけ定常の約 5〜6 倍かかる**
+ * （この板の実測 244.65 ms vs 41.47 ms。受容野 36 + iSTFT 2 = 38 フレームの warmup で
+ * 内部の step_chunk が複数回走るため）。鳴らし始めた直後から合成を始めると、
+ * その 1 回ぶんが確実にアンダーランになる。 */
+#ifndef SAAN_SPK_PREROLL_SAMPLES
+#define SAAN_SPK_PREROLL_SAMPLES 8192
+#endif
+
 bool saan_speaker_setup(uint32_t sample_rate);
 
-/* 発話の開始。`total_samples`（n_frames × SAAN_HOP）ぶんの int16 バッファと
- * リップシンク包絡を PSRAM に取る。saan_speaker_stop() が再生完了を待ってから解放する。
- * ⚠️ 音声 1 秒あたり 44,100 B（+ 包絡 43 B）。350 ids の上限でも 8 MB PSRAM に収まる。 */
-bool saan_speaker_begin_utterance(size_t total_samples);
+/* 発話の開始。`preroll_samples` ぶんの int16 を貯める場所と、`total_samples`
+ * （n_frames × SAAN_HOP）ぶんのリップシンク包絡を PSRAM に取る。
+ *   ストリーミング   … preroll = SAAN_SPK_PREROLL_SAMPLES（total 以下に切る）
+ *   貯めてから鳴らす … preroll = total
+ * 取れなければ false（**黙って切り詰めない**）。saan_speaker_stop() が再生完了を待ってから解放する。 */
+bool saan_speaker_begin_utterance(size_t preroll_samples, size_t total_samples);
 
-/* float[-1,1] → int16 に変換してバッファに貯める。まだ鳴らさない。
- * ⚠️ `n_samples` は**サンプル数**（フレーム数 × SAAN_HOP）。総量を超えたら false */
-bool saan_speaker_push_f32(const float *pcm, size_t n_samples);
+/* まだ鳴らさずに変換して貯める。begin_utterance の量を超えたら false。
+ * ⚠️ `n_samples` は**サンプル数**（フレーム数 × SAAN_HOP）。 */
+bool saan_speaker_preroll_push(const float *pcm, size_t n_samples);
 
-/* 貯めたぶんを鳴らし始める。begin 以降に 1 回だけ */
+/* 鳴らし始めて、貯めたぶんを 1 回の playRaw で渡す */
 bool saan_speaker_start(void);
 
-/* 再生が書き込みを追い越していないかを見る（渡す作業は start() で済んでいる）。
- *   合成ループから毎チャンク呼ぶ。final は互換のための引数で意味は無い。
- *   ⚠️ 追い越された区間は begin_utterance のゼロ埋め = 無音が鳴る（ゴミではない）。
- * 戻り値: 再生位置（DMA の先読みを含む）が書き込み位置を越えていたら true。 */
-bool saan_speaker_pump(bool final);
+/* float[-1,1] → int16 に変換してリングに書き、playRaw する（キューが満杯なら空くまで**ブロック**）。
+ * ⚠️ 1 回に渡せるのは 2,048 sample（= 1 チャンク）まで。 */
+bool saan_speaker_write_f32(const float *pcm, size_t n_samples);
 
-/* 鳴らし終わるまで待ち、バッファを解放する */
+/* 鳴らし終わるまで待ち、プリロールバッファを解放する */
 void saan_speaker_stop(void);
 
-/* 貯めた / 渡した サンプル数（ログ用） */
+/* 変換した / キューに渡した サンプル数（ログ用。発話ごとに 0 に戻る） */
 size_t saan_speaker_buffered(void);
 size_t saan_speaker_sent(void);
 
 /* いま鳴っている位置の音量 0..1（発話内の最大 RMS で正規化）。鳴っていなければ 0。
- * ⚠️ 再生位置は「鳴らし始めた時刻 + 経過時間」から推定する。途切れている間は
- *    M5.Speaker.isPlaying() が false になるので 0 を返し、次の区間を渡すときに
- *    時刻を取り直す。 */
+ * ⚠️ 再生位置は「鳴らし始めた時刻 + 経過時間」から推定する。アンダーランで止まった間は
+ *    M5.Speaker.isPlaying() が 0 になるので 0 を返し、次のチャンクを渡すときに時刻を取り直す。 */
 float saan_speaker_level_now(void);
 
 /* float → int16。**正規化しない**（発話ごとに音量が変わると決定性が壊れる）。

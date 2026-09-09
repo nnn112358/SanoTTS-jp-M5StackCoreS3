@@ -40,8 +40,10 @@ cd SanoTTS-jp-M5StackCoreS3
 | フラグ | 既定 | 意味 |
 |---|---|---|
 | `-DSAAN_UI=avatar/text` | **avatar** | 画面。avatar = m5stack-avatar の顔 + 吹き出し + リップシンク / text = 文字だけ（文・出典・ステータスの 3 段。avatar はリンクしない） |
+| `-DSAAN_BOARD=cores3/core2/atoms3/atoms3r/stampc5` | **cores3** | ボード（下の「対応ボード」）。`idf_board.sh <ボード>` が sdkconfig.<ボード> と組で渡す |
+| `-DSAAN_DICT=44000/135000/228000/438750` | ボードごと | 辞書（本家 Release の `k1-dict-*.bin`。`scripts/get_dict.sh all` で取る）。既定はボードの dict パーティションに入る最大: cores3 438750 / atoms3・atoms3r 135000 / core2 44000。入らない組み合わせは CMake が止める |
 | `-DSAAN_ENABLE_PIE=0/1` | **1** | W8A8 + ESP32-S3 の整数 SIMD (PIE)。0 = W8A32 / 移植可能 C |
-| `-DSAAN_BUFFERED=0/1` | **0** | 0 = xRT から先読み量を決めて計算しながら鳴らす / 1 = 全部貯めてから鳴らす |
+| `-DSAAN_BUFFERED=0/1` | **0** | 0 = プリロール（4 チャンク = 371 ms）後に計算しながら鳴らす / 1 = 全部貯めてから鳴らす（途切れない） |
 | `-DSAAN_BOOT_SPEAK=0/1` | **1** | 起動時に 1 文喋る |
 | `-DSAAN_KANJI=0/1` | **1** | 端末内漢字 G2P（辞書 13.7 MB + Open JTalk）。0 で外すと入力はかな中間表現だけ、辞書も焼かない |
 | `-DSAAN_CORE_IRAM=0/1` | **1** | 推論コアの `.text` を IRAM に置く（約 10 KB。旧コアで −2.4%） |
@@ -57,6 +59,39 @@ cd SanoTTS-jp-M5StackCoreS3
 ./idf.sh -p /dev/ttyACM0 flash monitor                                                # 顔（既定、build/）
 ./idf.sh -B build_text -DSDKCONFIG=build_text/sdkconfig -DSAAN_UI=text -p /dev/ttyACM0 flash monitor   # 文字だけ
 ```
+
+### 対応ボード
+
+| ボード | チップ / PSRAM / flash | 画面 | もう一度喋る | スピーカー | 辞書（13M=438750 / 8M=228000 / 4M=135000 / 2M=44000 語） | 実機確認 |
+|---|---|---|---|---|---|---|
+| **CoreS3**（既定） | S3 / 8 MB Quad / 16 MB | 顔（avatar）か text | タッチ | 内蔵 AW88298 | 13M / 8M / 4M / 2M（dict 14.6 MB） | ✅ 2026-09-07〜10 |
+| **ATOMS3** | S3 / 無し / 8 MB | 文字 128 x 128（`saan_ui_atoms3.cpp`） | 本体ボタン | **Atomic Voice Base**（ES8311 + NS4150B。旧名 Atomic Echo Base） | 4M / 2M（dict 6.2 MB） | ✅ 2026-09-10（音は人が聴いて確認すること） |
+| **ATOMS3R** | S3 / 8 MB **Octal** / 8 MB | 同上 | 本体ボタン | 同上 | 4M / 2M | ⚠️ ビルドのみ |
+| **Core2** | **ESP32** / 8 MB / 16 MB | 顔（avatar）か text | タッチ | 内蔵 NS4168 | 4M / 2M（dict 3 MB。4M は mmap の窓に入らないかもしれない） | ⚠️ ビルドのみ |
+| **Stamp-C5** | **ESP32-C5**（RISC-V）/ 無し / 4 MB | 無し | 無し（シリアル入力のみ） | **外付け I2S DAC**（BCLK G5 / WS G6 / DOUT G7。`-DSAAN_I2S_GPIO_*` で変更） | 2M（dict 2.4 MB） | ⚠️ ビルドのみ |
+
+CoreS3 のファイルはそのままで、ボードごとに `sdkconfig.<ボード>` / `partitions_<ボード>.csv` を足し、`-DSAAN_BOARD` で
+切り替える（`idf_board.sh` が組で渡す）。ボードごとに build ディレクトリが分かれる（`build/`、`build_atoms3/` …）。
+
+```sh
+scripts/get_dict.sh all                                   # 辞書 4 種を model/ に取る
+./idf_board.sh atoms3  -p /dev/ttyACM0 flash monitor      # ATOMS3 + Voice Base（辞書 135000）
+./idf_board.sh atoms3  -DSAAN_DICT=44000 build            # 辞書を替える
+./idf_board.sh atoms3r -p /dev/ttyACM0 flash monitor      # ATOMS3R
+./idf_board.sh core2   -p /dev/ttyUSB0 flash monitor      # Core2（UART コンソール）
+./idf_board.sh stampc5 -p /dev/ttyACM0 flash monitor      # Stamp-C5（外付け I2S DAC）
+scripts/make_images.sh                                    # 全ボード × 入る辞書の一括イメージ → firmware/<日付>_images/
+```
+
+- **ATOMS3 / ATOMS3R**: 本体にスピーカーが無いので Atomic Voice Base を M5Unified の
+  `external_speaker.atomic_echo` で有効にする（I2S G8/G6/G5、ES8311 は I2C G38/G39）。M5Unified は Base の
+  有無を probe しないので、**Base を外すと無音のまま正常終了する**。PSRAM 無しの ATOMS3 では音声バッファ
+  28 KB と Open JTalk のヒープが内部 DRAM に落ちる（起動ログの WARN は正常。1 発話後の空き 110 KB）。
+- **Stamp-C5**: 画面・スピーカー・ボタンが無いので、外付けの I2S DAC/アンプ（MAX98357A など）を G5/G6/G7 に繋ぎ、
+  シリアルから文を入れる。RISC-V なので W8A32（checksum `0xe4b645c30835d42d`）。速度は**未測定**。
+- **Core2**: ESP32 には PIE が無いので W8A32（checksum の期待値は `0xe4b645c30835d42d`）。arena 176 KB は
+  .bss に入らず PSRAM から取る（遅い。**xRT は未測定**で、ストリーミングでは途切れる前提。`-DSAAN_BUFFERED=1`
+  を勧める）。flash の mmap 窓が 4 MB しかないので辞書は 3 MB まで。
 
 ### M5Stack Tab5（ESP32-P4）
 
@@ -76,6 +111,9 @@ CoreS3 は native USB なので `/dev/ttyACM0`（権限が無ければ
 2026-09-07 にこの板で実測した（[`docs/measurements.md`](docs/measurements.md)）: **顔ありの既定ビルドで
 定常 xRT 0.445 / 追い越し 0 / checksum `0xa69a7ebbb5ccb05f`（本家 QEMU・本家 M5 実機と一致）**。
 先読みは 2 チャンク（186 ms）で足り、**発話開始まで 330 ms**（旧コアは 1.8 s）。
+⚠️ **2026-09-10 に再生の給餌方式を本家の M5 実装（`saan_audio_m5.cpp`）と同じにした**（固定プリロール
+4 チャンク + 2,048 sample × 3 枚のリング、チャンクごとに `playRaw`。xRT からの先読み自動決定は外した）。
+**この方式での実機再測定はまだ**（発話開始は 4 チャンクぶんの約 370 ms になる見込み）。
 本家 Release v0.3.0 の CoreS3 イメージ（顔なし）も同じ板で 0.448 を再現している。
 ⚠️ **checksum の期待値が変わった**（S3 = GELU の erf 近似）: W8A8+PIE **`0xa69a7ebbb5ccb05f`** /
 W8A32 `0xe4b645c30835d42d`。旧コアの `0x04de91103a0e49f9` とは一致しない。
@@ -99,7 +137,7 @@ W8A32 `0xe4b645c30835d42d`。旧コアの `0x04de91103a0e49f9` とは一致し�
 | | 出所 | ライセンス |
 |---|---|---|
 | 推論コア・ファーム本体・スクリプト | [sanoTTS-jp](https://github.com/ayutaz/sanoTTS-jp) origin/main d169e91（`csrc/`, `esp32/main/`, `scripts/`） | MIT |
-| CoreS3 向けの変更（M5.Speaker / 顔 / タッチ / 先読み自動） | このリポジトリ | MIT（[`LICENSE`](LICENSE)） |
+| CoreS3 向けの変更（M5.Speaker / 顔 / タッチ） | このリポジトリ | MIT（[`LICENSE`](LICENSE)） |
 | **`model/student_i8.bin`** | **sanoTTS-jp Release v0.3.0 `saanotts-jp-v3-int8.bin`**（blob v2、SHA-256 `2d2b8543…`、[`model/README.md`](model/README.md)） | **sanoTTS-jp Model License 1.0** |
 | M5Unified / M5GFX | ESP-IDF Component Registry | MIT（日本語フォントは IPA Font License） |
 | m5stack-avatar 0.10.0（`components/m5stack-avatar/`） | [stack-chan/m5stack-avatar](https://github.com/stack-chan/m5stack-avatar)（vendored） | MIT |

@@ -1,0 +1,27 @@
+# M5Stack Core2 / Core2 AWS（**ESP32**（S3 ではない）/ 16 MB flash / 8 MB PSRAM / NS4168 / FT6336 タッチ）
+#
+# sdkconfig.defaults（CoreS3）に重ねて使う: ./idf_board.sh core2 build flash monitor
+#   （idf_board.sh が -DIDF_TARGET=esp32 と -DSAAN_BOARD=core2 も渡す）
+#
+# ⚠️ **ESP32 には PIE が無い。** CMakeLists.txt が SAAN_BOARD=core2 なら W8A32（移植可能 C）にする。
+#    checksum の期待値は W8A32 の 0xe4b645c30835d42d。速度は S3 より大きく遅い（**未測定**）ので、
+#    ストリーミングでは途切れる前提。-DSAAN_BUFFERED=1（貯めてから鳴らす）を勧める。
+# ⚠️ **ESP32 は静的 DRAM が小さく、arena 176 KB が .bss に入らない**（本家 Core2 で 65 KB 溢れた）。
+#    SAAN_BOARD=core2 は SAAN_ARENA_HEAP=1（起動時に PSRAM から取る。遅い）になる。
+# ⚠️ **flash の mmap 窓は 4 MB**（DROM 0x3F400000〜）。app の .rodata（重み 654 KB + フォント）と
+#    辞書を同時に貼るので、辞書は partitions_core2.csv の 3 MB まで。k1-dict-44000-2mb.bin（0.98 MB）は
+#    確実、k1-dict-135000-4mb.bin（3.0 MB）は窓に入らない可能性がある（起動ログの esp_partition_mmap で分かる）。
+# ⚠️ **2026-09-10 時点でビルドのみ。実機（Core2）は未確認。**
+# ⚠️ defaults の CONFIG_ESP32S3_* / SPIRAM_MODE_* は esp32 には無いので無視される（警告は正常）。
+CONFIG_IDF_TARGET="esp32"
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=n
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_TYPE_AUTO=y
+CONFIG_SPIRAM_SPEED_80M=y
+# コンソールは UART0（Core2 は CP2104 の USB-UART ブリッジ。/dev/ttyUSB0）
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=n
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_core2.csv"

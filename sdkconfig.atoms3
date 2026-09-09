@@ -1,0 +1,18 @@
+# M5 ATOMS3（ESP32-S3-PICO-1-N8: 8 MB flash / **PSRAM 無し** / 128 x 128 LCD）+ Atomic Voice Base
+# （旧名 Atomic Echo Base: ES8311 + NS4150B。I2C G38/G39、I2S BCK G8 / WS G6 / DOUT G5 / DIN G7）
+#
+# sdkconfig.defaults（CoreS3）に**重ねて**使う。後の行が勝つ:
+#     ./idf_atoms3.sh build flash monitor
+#   = ./idf.sh -B build_atoms3 -DSDKCONFIG=build_atoms3/sdkconfig \
+#              -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.atoms3" -DSAAN_BOARD=atoms3 ...
+#
+# ⚠️ **PSRAM は無い。** CONFIG_SPIRAM=n にすると defaults の SPIRAM_* は無視される。
+#    音声バッファ（プリロール 16 KB + リング 12 KB）と Open JTalk の一時ヒープは内部 DRAM に落ちる
+#    （saan_speaker.cpp / oj_heap_psram.c はどちらも PSRAM 無しで動く。起動ログに WARN が出るのは正常）。
+# ⚠️ **flash 8 MB。** 辞書は 6.2 MB まで（partitions_atoms3.csv）。k1-dict-438750.bin（13.7 MB）は
+#    入らないので、本家の枝刈り辞書 k1-dict-135000-4mb.bin（3.0 MB）を使う（CMakeLists.txt の既定）。
+# ⚠️ コンソールは CoreS3 と同じ USB Serial/JTAG（ATOMS3 も native USB）。
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=n
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_SPIRAM=n
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_atoms3.csv"

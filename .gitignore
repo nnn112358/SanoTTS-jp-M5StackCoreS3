@@ -7,8 +7,16 @@ sdkconfig.old
 # 実機ログ（手元の測定記録。リポジトリには含めない）
 logs/
 
-# 辞書 blob（13.7 MB）。scripts/get_dict.sh で Release から取る
-model/k1-dict-438750.bin
+# 辞書 blob（0.98〜13.7 MB）。scripts/get_dict.sh で Release から取る
+model/k1-dict-*.bin
 
 # 実機に焼いた一括 16 MB イメージ（firmware/README.md 参照）。app 等の小さいバイナリは入れる
 firmware/*/m5-cores3-*-16mb.bin
+
+# ATOMS3 の一括 8 MB イメージ（5.2 MB）。部品は入れる
+firmware/*/m5-atoms3-*-8mb.bin
+firmware/*_images/*.bin
+
+# 辞書 blob のコピーと辞書込みの一括イメージ（大きい。SHA256SUMS で照合）
+firmware/*/k1-dict-*.bin
+firmware/*/m5-*-kanji-dict*.bin

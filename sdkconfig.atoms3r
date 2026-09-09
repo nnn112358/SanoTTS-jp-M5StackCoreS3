@@ -1,0 +1,13 @@
+# M5 ATOMS3R（ESP32-S3-PICO-1-N8R8: 8 MB flash / **8 MB Octal PSRAM** / 128 x 128 LCD）+ Atomic Voice Base
+#
+# sdkconfig.defaults（CoreS3）に重ねて使う: ./idf_board.sh atoms3r build flash monitor
+# ATOMS3（sdkconfig.atoms3）との違いは PSRAM があること（**Octal**。CoreS3 の Quad とは逆）だけ。
+# 画面・ボタン・スピーカーは ATOMS3 と同じ saan_ui_atoms3.cpp / external_speaker.atomic_echo。
+# ⚠️ **2026-09-10 時点でビルドのみ。実機（ATOMS3R）は未確認。** PSRAM の種別を間違えると
+#    `psram: PSRAM chip is not connected` でブートループになる。そのときは MODE_QUAD に替えて試すこと。
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=n
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=n
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_atoms3.csv"

@@ -1,8 +1,9 @@
-# ファーム本体。main.c は sanoTTS-jp/esp32/main/main.c を CoreS3 向け（顔・先読み自動）に
+# ファーム本体。main.c は sanoTTS-jp/esp32/main/main.c を CoreS3 向け（顔・タッチ）に
 # 改変したもの。saan_console.{c,h} / saan_dict.{c,h} / saan_kanji.{c,h} は本家 origin/main
 # （d169e91、2026-09-04）の**そのままのコピー**。音声出力は M5.Speaker 版（saan_speaker.cpp）、
 # 画面は m5stack-avatar 版（saan_ui.cpp）。本家の saan_i2s.c / saan_pcm.c / saan_audio.h は
-# **持ってこない**（PCM 統計は saan_speaker.cpp が持つ）。
+# **持ってこない**（PCM 統計は saan_speaker.cpp が持つ。給餌の仕組みは本家 boards/m5unified の
+# saan_audio_m5.cpp と同じ: プリロール → start → チャンクごとに playRaw）。
 #
 # esp_partition は辞書（dict パーティション）を**探す**のに要る。貼るのは esp_mmu_map（esp_mm）:
 #    saan_dict.c は CONFIG_SPI_FLASH_ROM_IMPL=y のとき自動で esp_mmu_map に切り替える
@@ -46,6 +47,10 @@ elseif(SAAN_UI STREQUAL "text")
     set(SAAN_UI_SRC "saan_ui_text.cpp")
     set(SAAN_UI_REQ "")
     message(STATUS "sanoTTS: 画面 = **文字表示**（M5GFX のみ。m5stack-avatar はリンクしない）— 顔なら -DSAAN_UI=avatar")
+elseif(SAAN_UI STREQUAL "atoms3")
+    set(SAAN_UI_SRC "saan_ui_atoms3.cpp")
+    set(SAAN_UI_REQ "")
+    message(STATUS "sanoTTS: 画面 = **ATOMS3**（128 x 128 文字表示 + ボタン A。m5stack-avatar はリンクしない）")
 else()
     message(FATAL_ERROR "SAAN_UI=${SAAN_UI} は不明。avatar か text を渡すこと")
 endif()
@@ -60,6 +65,28 @@ idf_component_register(
     INCLUDE_DIRS "."
     REQUIRES saanotts_core ${SAAN_UI_REQ} esp_timer esp_driver_usb_serial_jtag esp_driver_uart esp_mm esp_partition
 )
+
+# --- ボード（-DSAAN_BOARD=atoms3 で saan_speaker.cpp が Atomic Voice Base を有効にする）------------
+# ⚠️ トップの CMakeLists.txt がビルドプロパティに載せている（SAAN_UI と同じ理由）。
+idf_build_get_property(_saan_board_prop SAAN_BOARD)
+if(_saan_board_prop MATCHES "^atoms3")
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE SAAN_BOARD_ATOMS3=1)
+    message(STATUS "sanoTTS: ボード = **${_saan_board_prop} + Atomic Voice Base**（external_speaker.atomic_echo）")
+elseif(_saan_board_prop STREQUAL "stampc5")
+    # 画面もスピーカーも無い。外付け I2S DAC のピンを saan_speaker.cpp が M5.Speaker に渡す
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE SAAN_BOARD_STAMPC5=1)
+    message(STATUS "sanoTTS: ボード = **Stamp-C5**（外付け I2S DAC: BCLK G5 / WS G6 / DOUT G7。-DSAAN_I2S_GPIO_* で変更）")
+elseif(_saan_board_prop STREQUAL "core2")
+    # ESP32 は静的 DRAM が小さく arena 176 KB が .bss に入らない → 起動時に PSRAM から取る（main.c）
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE SAAN_ARENA_HEAP=1)
+    message(STATUS "sanoTTS: ボード = **Core2**（arena は PSRAM のヒープ）")
+endif()
+
+foreach(_pin BCLK WS DOUT)
+    if(DEFINED SAAN_I2S_GPIO_${_pin})
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE SAAN_I2S_GPIO_${_pin}=${SAAN_I2S_GPIO_${_pin}})
+    endif()
+endforeach()
 
 # --- 重み blob → `const` 配列のヘッダ ---------------------------------------
 #

@@ -1,0 +1,14 @@
+# sanoTTS-jp / M5 ATOMS3 のパーティション表（**8 MB** flash、端末内漢字 G2P つき）
+#
+# CoreS3 の partitions.csv と同じ配置で、dict だけ 8 MB に収まる大きさに縮めたもの。
+# 辞書は本家の枝刈り版 k1-dict-135000-4mb.bin（3,006,656 B）。dict は 6,225,920 B あるので
+# k1-dict-228000-8mb.bin（7,123,088 B）は**入らない**。
+#
+# ⚠️ **`dict` の offset は 64 KB (0x10000) 境界に置くこと**（mmap のページ境界）。
+# ⚠️ **factory は 2 MB。** app は約 1.4 MB（フォント・Open JTalk 込み）。
+#
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+factory,  app,  factory, 0x10000,  0x200000,
+dict,     data, 0x41,    0x210000, 0x5F0000,

@@ -65,8 +65,16 @@ set(SAAN_MODEL_BLOB "${SAAN_MODEL_BLOB}" CACHE INTERNAL "重み blob の絶対�
 # 実機実測（README）: W8A32 は 4.83x RT、W8A8 + PIE は 1.56x RT。
 # 出力は両方とも QEMU と bit 一致しているので、速い方を既定にする。
 # ⚠️ **CMake のキャッシュに残る。** 一度 -D で渡した値は build/ を消すまで有効。
+# ⚠️ SAAN_BOARD はこの下（project() の前）で決まるが、PIE の既定はボードが要るので先に読む。
 if(NOT DEFINED SAAN_ENABLE_PIE)
-    set(SAAN_ENABLE_PIE 1)
+    if(SAAN_BOARD MATCHES "^(core2|stampc5)$")
+        set(SAAN_ENABLE_PIE 0)   # ESP32 / ESP32-C5 に PIE は無い
+    else()
+        set(SAAN_ENABLE_PIE 1)
+    endif()
+endif()
+if(SAAN_ENABLE_PIE AND SAAN_BOARD MATCHES "^(core2|stampc5)$")
+    message(FATAL_ERROR "${SAAN_BOARD} に PIE 命令は無い（ESP32-S3 だけ）。-DSAAN_ENABLE_PIE=0 で")
 endif()
 set(SAAN_ENABLE_PIE "${SAAN_ENABLE_PIE}" CACHE INTERNAL "W8A8 + PIE を使うか")
 
@@ -91,8 +99,47 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 #    REQUIRES が固まり、text でも m5stack-avatar がビルド対象に残る（実際に残った。
 #    project_description.json の main.reqs で確認）。ビルドプロパティは早期展開に渡るので、
 #    ここで載せて main 側は idf_build_get_property で読む。
+# --- ボード（-DSAAN_BOARD=cores3|core2|atoms3|atoms3r。既定 cores3。idf_board.sh が渡す）------------
+#
+# | ボード      | チップ   | PSRAM      | 画面                         | スピーカー                     | 辞書の上限 |
+# | cores3  | ESP32-S3 | 8 MB Quad  | 顔（avatar）/ text           | 内蔵 AW88298                   | 14.6 MB    |
+# | core2   | ESP32    | 8 MB       | 顔（avatar）/ text           | 内蔵 NS4168                    | 3 MB（mmap 窓 4 MB） |
+# | atoms3  | ESP32-S3 | 無し       | saan_ui_atoms3.cpp（ボタン） | Atomic Voice Base（atomic_echo）| 6.2 MB    |
+# | atoms3r | ESP32-S3 | 8 MB Octal | 同上                         | 同上                           | 6.2 MB     |
+# | stampc5 | ESP32-C5 | 無し       | 無し（同上のヘッドレス経路） | 外付け I2S DAC（G5/G6/G7）     | 2.4 MB（4 MB flash） |
+# sdkconfig.<ボード> / partitions_<ボード>.csv と組で使う（cores3 は sdkconfig.defaults / partitions.csv）。
+# CoreS3 の既定は何も変わらない。
+if(NOT DEFINED SAAN_BOARD)
+    set(SAAN_BOARD "cores3")
+endif()
+if(NOT SAAN_BOARD MATCHES "^(cores3|core2|atoms3|atoms3r|stampc5)$")
+    message(FATAL_ERROR "SAAN_BOARD=${SAAN_BOARD} は不明。cores3 | core2 | atoms3 | atoms3r | stampc5")
+endif()
+set(SAAN_BOARD "${SAAN_BOARD}" CACHE STRING "ボード: cores3 | core2 | atoms3 | atoms3r | stampc5")
+idf_build_set_property(SAAN_BOARD "${SAAN_BOARD}")
+
 if(NOT DEFINED SAAN_UI)
-    set(SAAN_UI "avatar")
+    if(SAAN_BOARD MATCHES "^atoms3" OR SAAN_BOARD STREQUAL "stampc5")
+        set(SAAN_UI "atoms3")   # stampc5 は画面が無いが、同じ実装が width()==0 で描画を飛ばす
+    else()
+        set(SAAN_UI "avatar")
+    endif()
+endif()
+
+# ESP32（Core2）: PIE 命令が無い → W8A32。arena 176 KB が .bss に入らない → PSRAM（SAAN_ARENA_HEAP）。
+# IRAM も小さいので推論コアは flash のまま。
+if(SAAN_BOARD STREQUAL "core2")
+    if(NOT DEFINED SAAN_CORE_IRAM)
+        set(SAAN_CORE_IRAM 0 CACHE INTERNAL "Core2 は IRAM が小さいのでコアを flash に置く")
+    endif()
+    message(STATUS "sanoTTS: ボード = Core2（ESP32）。W8A32 / arena は PSRAM / コアは flash")
+endif()
+# ESP32-C5（Stamp-C5）: RISC-V なので PIE 無し（W8A32）。linker.lf の IRAM 配置は Xtensa 向けなので使わない。
+if(SAAN_BOARD STREQUAL "stampc5")
+    if(NOT DEFINED SAAN_CORE_IRAM)
+        set(SAAN_CORE_IRAM 0 CACHE INTERNAL "Stamp-C5（RISC-V）はコアを flash に置く")
+    endif()
+    message(STATUS "sanoTTS: ボード = Stamp-C5（ESP32-C5 / RISC-V）。W8A32 / 外付け I2S DAC / 辞書 2M")
 endif()
 set(SAAN_UI "${SAAN_UI}" CACHE STRING "画面の実装: avatar（顔）か text（文字だけ）")
 idf_build_set_property(SAAN_UI "${SAAN_UI}")
@@ -110,8 +157,41 @@ if(NOT DEFINED SAAN_KANJI)
     set(SAAN_KANJI 1)
 endif()
 if(SAAN_KANJI)
+# 辞書は -DSAAN_DICT=44000|135000|228000|438750 で選ぶ（本家 Release の k1-dict-*.bin。scripts/get_dict.sh）。
+# 既定はボードの dict パーティションに入る最大: cores3 438750 / atoms3・atoms3r 135000 / core2・stampc5 44000。
+# ⚠️ パーティションに入らない組み合わせはここで止める（焼けても起動時に jdict_open が落ちる）。
+set(_saan_dict_files
+    44000  "k1-dict-44000-2mb.bin"
+    135000 "k1-dict-135000-4mb.bin"
+    228000 "k1-dict-228000-8mb.bin"
+    438750 "k1-dict-438750.bin")
+if(NOT DEFINED SAAN_DICT)
+    if(SAAN_BOARD STREQUAL "cores3")
+        set(SAAN_DICT 438750)
+    elseif(SAAN_BOARD MATCHES "^(core2|stampc5)$")
+        set(SAAN_DICT 44000)
+    else()
+        set(SAAN_DICT 135000)
+    endif()
+endif()
+list(FIND _saan_dict_files "${SAAN_DICT}" _saan_dict_i)
+if(_saan_dict_i LESS 0)
+    message(FATAL_ERROR "SAAN_DICT=${SAAN_DICT} は不明。44000 | 135000 | 228000 | 438750")
+endif()
+math(EXPR _saan_dict_i "${_saan_dict_i} + 1")
+list(GET _saan_dict_files ${_saan_dict_i} _saan_dict_file)
+set(SAAN_DICT "${SAAN_DICT}" CACHE STRING "辞書: 44000 | 135000 | 228000 | 438750")
 if(NOT DEFINED SAAN_DICT_BLOB)
-    set(SAAN_DICT_BLOB "${CMAKE_CURRENT_LIST_DIR}/model/k1-dict-438750.bin")
+    set(SAAN_DICT_BLOB "${CMAKE_CURRENT_LIST_DIR}/model/${_saan_dict_file}")
+endif()
+if(SAAN_BOARD STREQUAL "cores3")
+    set(_saan_dict_cap 14614528)   # partitions.csv 0xDF0000
+elseif(SAAN_BOARD STREQUAL "core2")
+    set(_saan_dict_cap 3080192)    # partitions_core2.csv 0x2F0000
+elseif(SAAN_BOARD STREQUAL "stampc5")
+    set(_saan_dict_cap 2490368)    # partitions_stampc5.csv 0x260000
+else()
+    set(_saan_dict_cap 6225920)    # partitions_atoms3.csv 0x5F0000
 endif()
 if(NOT EXISTS "${SAAN_DICT_BLOB}")
     message(FATAL_ERROR
@@ -119,6 +199,10 @@ if(NOT EXISTS "${SAAN_DICT_BLOB}")
         "  scripts/get_dict.sh で取るか -DSAAN_DICT_BLOB=<絶対パス> を渡すこと")
 endif()
 file(SIZE "${SAAN_DICT_BLOB}" SAAN_DICT_BLOB_SIZE)
-message(STATUS "sanoTTS: dict blob ${SAAN_DICT_BLOB} (${SAAN_DICT_BLOB_SIZE} B) → dict パーティション")
+if(SAAN_DICT_BLOB_SIZE GREATER _saan_dict_cap)
+    message(FATAL_ERROR "辞書 ${SAAN_DICT_BLOB}（${SAAN_DICT_BLOB_SIZE} B）は ${SAAN_BOARD} の dict "
+                        "パーティション（${_saan_dict_cap} B）に入らない。-DSAAN_DICT を小さくすること")
+endif()
+message(STATUS "sanoTTS: dict blob ${SAAN_DICT_BLOB} (${SAAN_DICT_BLOB_SIZE} B / 上限 ${_saan_dict_cap} B) → dict パーティション")
 esptool_py_flash_to_partition(flash "dict" "${SAAN_DICT_BLOB}")
 endif()
