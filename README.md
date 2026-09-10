@@ -1,14 +1,17 @@
 # SanoTTS-jp on M5Stack CoreS3
 
 日本語 TTS **[sanoTTS-jp](https://github.com/ayutaz/sanoTTS-jp)**（559 K params の蒸留モデル、
-[arXiv:2608.21378](https://arxiv.org/abs/2608.21378) の日本語版）を **M5Stack CoreS3 単体**で動かす
-ESP-IDF プロジェクト。クラウドも辞書も不要。
+[arXiv:2608.21378](https://arxiv.org/abs/2608.21378) の日本語版）を **M5Stack 単体**で動かす
+ESP-IDF プロジェクト。クラウド不要。**CoreS3**（既定）のほか **Core2 / ATOMS3 / ATOMS3R / Stamp-C5** で
+ビルドできる（[対応ボード](#対応ボード)。実機で確かめたのは CoreS3 と ATOMS3）。
 
-- 起動すると [m5stack-avatar](https://github.com/stack-chan/m5stack-avatar) の顔が出て、
-  `今日は良い天気ですね。` を吹き出しに出しながら内蔵スピーカーで喋る（**口は音量に合わせて動く**）
-- **画面をタッチ**すると直前の文をもう一度喋る
+- 起動すると `今日は良い天気ですね。` を喋る。CoreS3 / Core2 では [m5stack-avatar](https://github.com/stack-chan/m5stack-avatar)
+  の顔が出て、吹き出しに文を出しながら**口が音量に合わせて動く**。ATOMS3 / ATOMS3R は 128 x 128 の文字表示、
+  Stamp-C5 は画面なし
+- **画面をタッチ**（ATOMS3 は本体ボタン）すると直前の文をもう一度喋る
 - USB シリアルの `かな> ` に**漢字かな交じり文をそのまま**打つと、その文を喋る
-  （端末内の辞書 13.7 MB + Open JTalk の NJD 鎖で読みとアクセントを付ける。クラウド不要）。
+  （端末内の辞書 + Open JTalk の NJD 鎖で読みとアクセントを付ける。辞書は flash に合わせて
+  13M / 8M / 4M / 2M の 4 種から選ぶ）。
   かな中間表現（`きょ][おわよ][いて][んきです°ね`）を打てば**前置記号なしで**そちらの経路に入る
 
 > **モデルと推論コアは [ayutaz/sanoTTS-jp](https://github.com/ayutaz/sanoTTS-jp) のものです。**
@@ -20,38 +23,41 @@ ESP-IDF プロジェクト。クラウドも辞書も不要。
 
 | | |
 |---|---|
-| ボード | **M5Stack CoreS3**（ESP32-S3 / 16 MB flash / 8 MB Quad PSRAM）。Tab5 は [別リポジトリ](https://github.com/nnn112358/SanoTTS-jp-Tab5) |
+| ボード | **M5Stack CoreS3**（既定）/ Core2 / ATOMS3 / ATOMS3R / Stamp-C5（[対応ボード](#対応ボード)）。Tab5 は [別リポジトリ](https://github.com/nnn112358/SanoTTS-jp-Tab5) |
 | ESP-IDF | **v5.5.5**（`~/esp/esp-idf` に置く前提。`idf.sh` 参照） |
 | Python | `uv`（ビルド時のヘッダ生成に使う。stdlib のみ） |
 | ネットワーク | 初回ビルドで M5Unified / M5GFX を Component Registry から取得 |
 | 重み | `model/student_i8.bin`（git に入れてある。sanoTTS-jp Release **v0.3.0** の `saanotts-jp-v3-int8.bin` = **blob v2**、654,032 B。[`model/README.md`](model/README.md)） |
-| 辞書 | `scripts/get_dict.sh` で sanoTTS-jp Release の `k1-dict-438750.bin`（13.7 MB）を `model/` に置く（git には入れていない） |
+| 辞書 | `scripts/get_dict.sh [438750\|228000\|135000\|44000\|all]` で sanoTTS-jp Release の `k1-dict-*.bin`（13M / 8M / 4M / 2M）を `model/` に置く（git には入れていない）。CoreS3 の既定は 13M |
 
 ## ビルドと書き込み
 
 ```sh
 git clone https://github.com/nnn112358/SanoTTS-jp-M5StackCoreS3
 cd SanoTTS-jp-M5StackCoreS3
-./scripts/get_dict.sh                       # 辞書 blob（13.7 MB）を取る
+./scripts/get_dict.sh                       # 辞書 blob（13M = 13.7 MB。CoreS3 の既定）を取る
 ./idf.sh build
 ./idf.sh -p /dev/ttyACM0 flash monitor      # 終了は Ctrl+]
 ```
+
+CoreS3 以外は `./idf_board.sh <ボード> …`（[対応ボード](#対応ボード)）。
 
 | フラグ | 既定 | 意味 |
 |---|---|---|
 | `-DSAAN_UI=avatar/text` | **avatar** | 画面。avatar = m5stack-avatar の顔 + 吹き出し + リップシンク / text = 文字だけ（文・出典・ステータスの 3 段。avatar はリンクしない） |
 | `-DSAAN_BOARD=cores3/core2/atoms3/atoms3r/stampc5` | **cores3** | ボード（下の「対応ボード」）。`idf_board.sh <ボード>` が sdkconfig.<ボード> と組で渡す |
-| `-DSAAN_DICT=44000/135000/228000/438750` | ボードごと | 辞書（本家 Release の `k1-dict-*.bin`。`scripts/get_dict.sh all` で取る）。既定はボードの dict パーティションに入る最大: cores3 438750 / atoms3・atoms3r 135000 / core2 44000。入らない組み合わせは CMake が止める |
-| `-DSAAN_ENABLE_PIE=0/1` | **1** | W8A8 + ESP32-S3 の整数 SIMD (PIE)。0 = W8A32 / 移植可能 C |
+| `-DSAAN_DICT=438750/228000/135000/44000` | ボードごと | 辞書 13M / 8M / 4M / 2M（本家 Release の `k1-dict-*.bin`。`scripts/get_dict.sh all` で取る）。既定はボードの dict パーティションに入る最大: cores3 438750 / atoms3・atoms3r 135000 / core2・stampc5 44000。入らない組み合わせは CMake が止める |
+| `-DSAAN_ENABLE_PIE=0/1` | **1**（S3） | W8A8 + ESP32-S3 の整数 SIMD (PIE)。0 = W8A32 / 移植可能 C。core2 / stampc5 は PIE 命令が無いので 0 に固定 |
 | `-DSAAN_BUFFERED=0/1` | **0** | 0 = プリロール（4 チャンク = 371 ms）後に計算しながら鳴らす / 1 = 全部貯めてから鳴らす（途切れない） |
 | `-DSAAN_BOOT_SPEAK=0/1` | **1** | 起動時に 1 文喋る |
-| `-DSAAN_KANJI=0/1` | **1** | 端末内漢字 G2P（辞書 13.7 MB + Open JTalk）。0 で外すと入力はかな中間表現だけ、辞書も焼かない |
-| `-DSAAN_CORE_IRAM=0/1` | **1** | 推論コアの `.text` を IRAM に置く（約 10 KB。旧コアで −2.4%） |
-| `-DSAAN_OJ_PSRAM=0/1` | **1** | Open JTalk の一時ヒープを PSRAM に向ける（0 は陽性対照。内部 DRAM が減るのを見る） |
+| `-DSAAN_KANJI=0/1` | **1** | 端末内漢字 G2P（辞書 + Open JTalk）。0 で外すと入力はかな中間表現だけ、辞書も焼かない |
+| `-DSAAN_CORE_IRAM=0/1` | **1**（S3） | 推論コアの `.text` を IRAM に置く（約 10 KB。旧コアで −2.4%）。core2 / stampc5 は 0 |
+| `-DSAAN_OJ_PSRAM=0/1` | **1** | Open JTalk の一時ヒープを PSRAM に向ける（0 は陽性対照。内部 DRAM が減るのを見る）。PSRAM の無い ATOMS3 / Stamp-C5 では内部 DRAM に落ちる |
 | `-DSAAN_PROFILE=0/1` | **0** | 段別プロファイル（CCOUNT）を発話後に出す。**速度の報告には 0 で**（計測にコストがある） |
 
-ビルド環境なしで焼くだけなら、実機確認済みのイメージが [`firmware/`](firmware/README.md) にある
-（一括 16 MB イメージを `esptool.py write_flash 0x0 …` で焼く）。
+ビルド環境なしで焼くだけなら、ボード × 辞書の一括イメージと app が [`firmware/`](firmware/README.md) にある
+（`esptool.py write_flash 0x0 …` で焼く。辞書込みの一括イメージは大きいので git には入れず、
+`scripts/make_images.sh` で作る）。
 
 `-D` の値は `build/` を消すまで CMake キャッシュに残る。顔と文字表示を行き来するなら build ディレクトリを分ける:
 
@@ -93,12 +99,13 @@ scripts/make_images.sh                                    # 全ボード × 入�
   .bss に入らず PSRAM から取る（遅い。**xRT は未測定**で、ストリーミングでは途切れる前提。`-DSAAN_BUFFERED=1`
   を勧める）。flash の mmap 窓が 4 MB しかないので辞書は 3 MB まで。
 
+シリアルポート: CoreS3 / ATOMS3 / ATOMS3R / Stamp-C5 は native USB なので `/dev/ttyACM0`（権限が無ければ
+`SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", MODE="0666"` を udev に）。Core2 は CP2104 経由の `/dev/ttyUSB0`。
+
 ### M5Stack Tab5（ESP32-P4）
 
 Tab5 向けは別リポジトリに分けた: **[SanoTTS-jp-Tab5](https://github.com/nnn112358/SanoTTS-jp-Tab5)**
-（Tab5 Keyboard でローマ字入力、横画面、P4 向けの設定）。このリポジトリは CoreS3 専用。
-CoreS3 は native USB なので `/dev/ttyACM0`（権限が無ければ
-`SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", MODE="0666"` を udev に）。
+（Tab5 Keyboard でローマ字入力、横画面、P4 向けの設定）。
 
 ## 現状
 
@@ -111,9 +118,11 @@ CoreS3 は native USB なので `/dev/ttyACM0`（権限が無ければ
 2026-09-07 にこの板で実測した（[`docs/measurements.md`](docs/measurements.md)）: **顔ありの既定ビルドで
 定常 xRT 0.445 / 追い越し 0 / checksum `0xa69a7ebbb5ccb05f`（本家 QEMU・本家 M5 実機と一致）**。
 先読みは 2 チャンク（186 ms）で足り、**発話開始まで 330 ms**（旧コアは 1.8 s）。
-⚠️ **2026-09-10 に再生の給餌方式を本家の M5 実装（`saan_audio_m5.cpp`）と同じにした**（固定プリロール
+**2026-09-10 に再生の給餌方式を本家の M5 実装（`saan_audio_m5.cpp`）と同じにした**（固定プリロール
 4 チャンク + 2,048 sample × 3 枚のリング、チャンクごとに `playRaw`。xRT からの先読み自動決定は外した）。
-**この方式での実機再測定はまだ**（発話開始は 4 チャンクぶんの約 370 ms になる見込み）。
+この方式で CoreS3（顔あり）は **定常 xRT 0.434 / アンダーラン 0 / 発話開始まで 424 ms**、
+ATOMS3 + Atomic Voice Base（PSRAM 無し）は **0.427 / 0 / 406 ms**（checksum はどちらも `0xa69a7ebbb5ccb05f`）。
+発話開始が 330 → 424 ms に伸びたのはプリロールが 2 → 4 チャンクになったぶん。
 本家 Release v0.3.0 の CoreS3 イメージ（顔なし）も同じ板で 0.448 を再現している。
 ⚠️ **checksum の期待値が変わった**（S3 = GELU の erf 近似）: W8A8+PIE **`0xa69a7ebbb5ccb05f`** /
 W8A32 `0xe4b645c30835d42d`。旧コアの `0x04de91103a0e49f9` とは一致しない。
@@ -129,7 +138,7 @@ W8A32 `0xe4b645c30835d42d`。旧コアの `0x04de91103a0e49f9` とは一致し�
 
 詳細:
 - [`docs/measurements.md`](docs/measurements.md) — 速度・正しさ・メモリの実測値
-- [`docs/design-notes.md`](docs/design-notes.md) — 構成、入力仕様、CoreS3 で踏んだことと対処
+- [`docs/design-notes.md`](docs/design-notes.md) — 構成、入力仕様、再生パイプライン、CoreS3 で踏んだことと対処
 - [`docs/upstream-comparison.md`](docs/upstream-comparison.md) — 公式実装 Ampixa/sanoTTS との違いと、0.22× RT に至った手順（公開文書とログのみ）
 
 ## 出所とライセンス
@@ -137,7 +146,7 @@ W8A32 `0xe4b645c30835d42d`。旧コアの `0x04de91103a0e49f9` とは一致し�
 | | 出所 | ライセンス |
 |---|---|---|
 | 推論コア・ファーム本体・スクリプト | [sanoTTS-jp](https://github.com/ayutaz/sanoTTS-jp) origin/main d169e91（`csrc/`, `esp32/main/`, `scripts/`） | MIT |
-| CoreS3 向けの変更（M5.Speaker / 顔 / タッチ） | このリポジトリ | MIT（[`LICENSE`](LICENSE)） |
+| M5Stack 向けの変更（M5.Speaker / 顔 / タッチ / ボードと辞書の切り替え） | このリポジトリ | MIT（[`LICENSE`](LICENSE)） |
 | **`model/student_i8.bin`** | **sanoTTS-jp Release v0.3.0 `saanotts-jp-v3-int8.bin`**（blob v2、SHA-256 `2d2b8543…`、[`model/README.md`](model/README.md)） | **sanoTTS-jp Model License 1.0** |
 | M5Unified / M5GFX | ESP-IDF Component Registry | MIT（日本語フォントは IPA Font License） |
 | m5stack-avatar 0.10.0（`components/m5stack-avatar/`） | [stack-chan/m5stack-avatar](https://github.com/stack-chan/m5stack-avatar)（vendored） | MIT |
