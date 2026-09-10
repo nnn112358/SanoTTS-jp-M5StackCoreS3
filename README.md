@@ -1,4 +1,4 @@
-# SanoTTS-jp on M5Stack CoreS3
+# SanoTTS-jp on M5Stack
 
 日本語 TTS **[sanoTTS-jp](https://github.com/ayutaz/sanoTTS-jp)**（559 K params の蒸留モデル、
 [arXiv:2608.21378](https://arxiv.org/abs/2608.21378) の日本語版）を **M5Stack 単体**で動かす
