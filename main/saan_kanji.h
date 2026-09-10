@@ -84,6 +84,17 @@ saan_kanji_status saan_kanji_to_ids(const jdict_t *d,
                                     int32_t *ids, int32_t ids_cap,
                                     int32_t *n_ids, int *n_tokens);
 
+/* 同じことを**複数ブロックの arena**（saanotts.h の saan_arena。SanoTTS-jp-M5Stack の追加）から
+ * 切り出して行う。固定長の配列は saan_alloc で個別に取り（どのブロックでもよい）、Viterbi には
+ * 残りのうち**最大の連続した塊**を渡す。ESP32（Core2 / Basic）で連続 144 KB が取れないときのため。
+ * 1 ブロックの arena なら saan_kanji_to_ids() と同じ配置になる。 */
+struct saan_arena_s;
+saan_kanji_status saan_kanji_to_ids_arena(const jdict_t *d,
+                                          const char *text, size_t nbytes,
+                                          void *arena_obj,   /* saan_arena * */
+                                          int32_t *ids, int32_t ids_cap,
+                                          int32_t *n_ids, int *n_tokens);
+
 const char *saan_kanji_strerror(saan_kanji_status s);
 
 #endif /* SAAN_KANJI_H */

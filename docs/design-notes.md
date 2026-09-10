@@ -191,8 +191,15 @@ ESP32（Core2 / Basic）は静的 .bss に 176 KB が入らず、PSRAM の無い
   戻し方は粘着失敗（コアの確保は LIFO なので起きない）
 - main.c（SAAN_ARENA_HEAP）は PSRAM 1 本 → 内部 1 本 → 内部の大きい塊から最大 4 本、の順に試す。各塊には
   SAAN_ARENA_HEAP_RESERVE（24 KB）を残す。漢字 G2P の Viterbi は連続領域が要るのでブロック 0 だけを貸す
+- 漢字 G2P（`saan_kanji_to_ids_arena()`）も同じ arena から切り出す。固定長の配列は saan_alloc で個別に、
+  Viterbi には残りが最大のブロックの残り全部。1 ブロックなら従来の `saan_kanji_to_ids()` と同じ配置
 - ホストテスト `scripts/host/arena_regions_test.c`: 1 本 / 100+76 KB / 64 KB × 3 で PCM の FNV-1a が bit 一致、
   used も同じ。40+40 KB は `SAAN_ERR_ARENA` で止まる
+- **QEMU（ESP32）で確認**（`scripts/qemu_basic.sh` → `scripts/qemu_run.py`。M5Unified は QEMU で動かないので
+  M5 無しの経路 `-DSAAN_HEADLESS=1 -DSAAN_SKIP_I2S=1`）: ESP32 の内部 DRAM は 147 KB + 111 KB + 14 KB + 6 KB の
+  塊で、arena は 94,208 + 86,016 B の 2 ブロックになる。辞書 mmap（3 MB。4 MB 窓の空き 3.2 MB）OK、
+  合成 checksum `0xe4b645c30835d42d`、漢字入力（形態素 7 / 53 ids）OK、1 発話後の内部 DRAM 空き 70 KB /
+  最大ブロック 26 KB。**M5 込みの実機はこれより厳しい**（M5GFX・avatar・M5.Speaker のタスクとバッファ）
 
 ```sh
 cc -std=c99 -O2 -Icomponents/saanotts_core -Imain scripts/host/arena_regions_test.c \

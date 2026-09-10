@@ -44,8 +44,10 @@ endif()
 #   stampc5（画面もスピーカーも無い）… saan_speaker_i2s.c（driver/i2s_std 直叩き）+ saan_ui_headless.c。
 #       **M5Unified / M5GFX / m5stack-avatar を参照しないのでイメージに入らない**（app 約 1 MB）。
 #   それ以外 … saan_speaker.cpp（M5.Speaker）+ 顔と文字の両方（実行時に切り替え）。
+#   -DSAAN_HEADLESS=1 … どのボードでも M5 無しの経路にする（QEMU で ESP32 のメモリ配置を確かめる用。scripts/qemu_basic.sh）
+#   -DSAAN_SKIP_I2S=1 … I2S への書き込みだけ外す（変換と checksum は通す。QEMU は I2S DMA を捌かない。本家と同じ逃げ道）
 idf_build_get_property(_saan_board_early SAAN_BOARD)
-if(_saan_board_early STREQUAL "stampc5")
+if(_saan_board_early STREQUAL "stampc5" OR SAAN_HEADLESS)
     set(SAAN_IO_SRC "saan_speaker_i2s.c" "saan_ui_headless.c")
     set(SAAN_IO_REQ esp_driver_i2s)
 else()
@@ -80,6 +82,10 @@ elseif(_saan_board_prop MATCHES "^(core2|basic)$")
     message(STATUS "sanoTTS: ボード = **${_saan_board_prop}**（arena はヒープ。PSRAM 優先）")
 endif()
 
+if(SAAN_SKIP_I2S)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE SAAN_SKIP_I2S=1)
+    message(STATUS "sanoTTS: SAAN_SKIP_I2S=1 — I2S に書かない（QEMU 用。音は出ない）")
+endif()
 foreach(_pin BCLK WS DOUT)
     if(DEFINED SAAN_I2S_GPIO_${_pin})
         target_compile_definitions(${COMPONENT_LIB} PRIVATE SAAN_I2S_GPIO_${_pin}=${SAAN_I2S_GPIO_${_pin}})

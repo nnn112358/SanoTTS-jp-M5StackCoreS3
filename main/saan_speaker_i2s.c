@@ -188,6 +188,14 @@ bool saan_speaker_preroll_push(const float *pcm, size_t n_samples) {
     return true;
 }
 
+#ifndef SAAN_SKIP_I2S
+#define SAAN_SKIP_I2S 0
+#endif
+#if SAAN_SKIP_I2S
+/* ⚠️ **QEMU 用の逃げ道であって、実機の構成ではない。** QEMU は I2S の DMA を捌かないので
+ * i2s_channel_write が永久にブロックする。書き込みだけ外し、**float→int16 変換は必ず通す**ので checksum は出る。 */
+static bool write_i16(const int16_t *p, size_t n) { (void)p; s_sent += n; return true; }
+#else
 static bool write_i16(const int16_t *p, size_t n) {
     size_t wrote = 0;
     esp_err_t err = i2s_channel_write(s_tx, p, n * sizeof(int16_t), &wrote, portMAX_DELAY);
@@ -203,15 +211,20 @@ static bool write_i16(const int16_t *p, size_t n) {
     s_sent += n;
     return true;
 }
+#endif /* SAAN_SKIP_I2S */
 
 bool saan_speaker_start(void) {
     if (!s_ready) { ESP_LOGE(TAG, "saan_speaker_setup が済んでいない"); return false; }
     if (s_started) return true;
+#if SAAN_SKIP_I2S
+    ESP_LOGW(TAG, "SAAN_SKIP_I2S: I2S を鳴らさない（QEMU 用。音は出ない）");
+#else
     esp_err_t err = i2s_channel_enable(s_tx);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "i2s_channel_enable: %s", esp_err_to_name(err));
         return false;
     }
+#endif
     s_started = true;
     if (s_preroll_fill > 0)
         ESP_LOGI(TAG, "貯めた %u sample (%.3f s) を送出", (unsigned)s_preroll_fill,
@@ -243,10 +256,12 @@ bool saan_speaker_write_f32(const float *pcm, size_t n_samples) {
 void saan_speaker_stop(void) {
     /* ⚠️ i2s_channel_write は DMA に渡し終えた時点で返る。最後の DMA バッファ
      *    （139 ms ぶん）が鳴り切るまで待ってから disable する。待たないと語尾が切れる */
+#if !SAAN_SKIP_I2S
     if (s_tx != NULL && s_started) {
         vTaskDelay(pdMS_TO_TICKS(SAAN_I2S_DMA_DESC * SAAN_I2S_DMA_FRAME * 1000 / 22050 + 10));
         i2s_channel_disable(s_tx);
     }
+#endif
     if (s_preroll_heap != NULL) {
         heap_caps_free(s_preroll_heap);
         s_preroll_heap = NULL;

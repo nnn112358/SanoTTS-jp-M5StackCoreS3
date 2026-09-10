@@ -157,14 +157,12 @@ typedef char saan_arena_holds_kanji_workbytes[
 /* tts_task の先頭で確保。16 B 境界は heap_caps_aligned_alloc が保証。
  * 176 KB が 1 本で取れないとき（PSRAM の無い ESP32 = Basic）は、内部ヒープの大きい塊から
  * **複数ブロック**に分けて取り、saan_arena_add() で 1 つの arena にする（コアの複数ブロック対応）。 */
-static uint8_t *g_arena;                              /* ブロック 0（漢字 G2P の作業領域もここ） */
-static size_t   g_arena0_size;                        /* ブロック 0 の大きさ */
+static uint8_t *g_arena;                              /* ブロック 0 */
 static uint8_t *g_arena_r[SAAN_ARENA_MAX_REGIONS];    /* 全ブロック */
 static size_t   g_arena_rn[SAAN_ARENA_MAX_REGIONS];
 static int      g_arena_nr;
 #else
 static __attribute__((aligned(16))) uint8_t g_arena[SAAN_ARENA_BYTES];
-#define g_arena0_size ((size_t)SAAN_ARENA_BYTES)
 #endif
 
 /* 発話ごとに arena を組み立てる（1 本なら init だけ） */
@@ -558,10 +556,11 @@ static bool speak_kanji(const saan_weights *w, const char *text, size_t nbytes) 
     int32_t n_ids = 0;
     int n_tok = 0;
     int64_t t0 = esp_timer_get_time();
-    /* ⚠️ Viterbi の作業領域は**連続**が要る。複数ブロックの arena ではブロック 0 だけを貸す */
-    saan_kanji_status ks = saan_kanji_to_ids(&g_dict, text, nbytes,
-                                            g_arena, g_arena0_size,
-                                            g_ids, SAAN_G2P_IDS_CAP, &n_ids, &n_tok);
+    /* 作業領域は合成用 arena（複数ブロックでもよい。固定長の配列は saan_alloc で、Viterbi は最大の塊） */
+    saan_arena ka;
+    arena_setup(&ka);
+    saan_kanji_status ks = saan_kanji_to_ids_arena(&g_dict, text, nbytes, &ka,
+                                                  g_ids, SAAN_G2P_IDS_CAP, &n_ids, &n_tok);
     int64_t dt = esp_timer_get_time() - t0;
     if (ks != SAAN_KANJI_OK) {
         ESP_LOGE(TAG, "漢字 G2P 失敗: %s", saan_kanji_strerror(ks));
@@ -750,12 +749,6 @@ static void tts_task(void *arg) {
                      (unsigned)got, g_arena_nr);
         }
     }
-    g_arena0_size = g_arena_rn[0];
-#if SAAN_KANJI
-    if (g_arena0_size < SAAN_KANJI_WORKBYTES)
-        ESP_LOGE(TAG, "arena のブロック 0（%u B）が漢字 G2P の作業領域（%u B）より小さい。漢字経路は失敗する",
-                 (unsigned)g_arena0_size, (unsigned)SAAN_KANJI_WORKBYTES);
-#endif
 #endif
     log_heap("起動直後");
     log_mmap_room();

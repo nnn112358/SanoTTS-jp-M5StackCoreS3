@@ -71,7 +71,7 @@ CoreS3 以外は `./idf_board.sh <ボード> …`（[対応ボード](#対応ボ
 | **ATOMS3** | S3 / 無し / 8 MB | 顔（scale 0.4）⇄ 文字 128 x 128 | 本体ボタン | **Atomic Voice Base**（ES8311 + NS4150B。旧名 Atomic Echo Base） | 4M / 2M（dict 6.2 MB） | ✅ 2026-09-10（文字 UI で確認。顔はビルドのみ。音は人が聴いて確認すること） |
 | **ATOMS3R** | S3 / 8 MB **Octal** / 8 MB | 同上 | 本体ボタン | 同上 | 4M / 2M | ⚠️ ビルドのみ |
 | **Core Basic**（V2.6 以降） | **ESP32** / **無し** / 16 MB | 顔 ⇄ 文字 | ボタン A | 内蔵 DAC (GPIO25) + アンプ | 4M / 2M（dict 3 MB） | ⚠️ ビルドのみ（arena は内部 DRAM の複数ブロックから取る。下） |
-| **Core2** | **ESP32** / 8 MB / 16 MB | 顔 ⇄ 文字 | タッチ | 内蔵 NS4168 | 4M / 2M（dict 3 MB。4M は mmap の窓に入らないかもしれない） | ⚠️ ビルドのみ |
+| **Core2** | **ESP32** / 8 MB / 16 MB | 顔 ⇄ 文字 | タッチ | 内蔵 NS4168 | 4M / 2M（dict 3 MB。4M は QEMU の M5 無し構成では入ったが、M5 込みは .rodata が 400 KB 大きく**入らない見込み**） | ⚠️ ビルドのみ |
 | **Stamp-C5** | **ESP32-C5**（RISC-V）/ 無し / 4 MB | 無し（M5Unified / M5GFX も入れない。app 約 1 MB） | 無し（シリアル入力のみ） | **外付け I2S DAC**（driver/i2s_std 直叩き。BCLK G5 / WS G6 / DOUT G7。`-DSAAN_I2S_GPIO_*` で変更） | 4M / 2M（dict 2.9 MB。本家 4 MB 版と同じ配置） | ⚠️ ビルドのみ |
 
 CoreS3 のファイルはそのままで、ボードごとに `sdkconfig.<ボード>` / `partitions_<ボード>.csv` を足し、`-DSAAN_BOARD` で
@@ -95,9 +95,11 @@ scripts/make_images.sh                                    # 全ボード × 入�
 - **Core Basic**: Core2 と同じ ESP32 だが PSRAM が無い。arena 176 KB は .bss にも内部ヒープの 1 塊にも入らない
   （ESP32 の内部 DRAM は 100〜127 KB の塊 2 つ）ので、**コアの arena を複数ブロック対応にし**（`saan_arena_add()`、
   first-fit + LIFO 履歴。このリポジトリでの追加、本家 csrc には無い）、起動時に内部ヒープの大きい塊から最大 4 本に
-  分けて取る。ホストで 1 本 / 100+76 KB / 64 KB × 3 の PCM が bit 一致することは確認済み（`scripts/host/arena_regions_test.c`）。
-  実機では、arena 176 KB + Open JTalk のヒープ + 音声バッファ 28 KB が内部 DRAM に収まるかが未確認。
-  初代 Basic（flash 4 MB）は対象外。
+  分けて取る。漢字 G2P の作業領域（144 KB）も同じ arena から saan_alloc で切り出す（Viterbi は最大の塊）。
+  ホストで 1 本 / 100+76 KB / 64 KB × 3 の PCM が bit 一致することを確認（`scripts/host/arena_regions_test.c`）。
+  **QEMU の ESP32 で確認済み**（`scripts/qemu_basic.sh`。M5 無しの経路）: arena 94 + 86 KB の 2 ブロック、辞書 mmap OK、
+  合成 checksum `0xe4b645c30835d42d`、漢字入力 OK、1 発話後の内部 DRAM 空き 70 KB。M5GFX / avatar のタスクぶん
+  （数十 KB）が実機で収まるかは未確認。初代 Basic（flash 4 MB）は対象外。
 - **Stamp-C5**: 画面・スピーカー・ボタンが無いので、外付けの I2S DAC/アンプ（MAX98357A など）を G5/G6/G7 に繋ぎ、
   シリアルから文を入れる。**M5Unified / M5GFX / avatar をリンクしない最小構成**（`saan_speaker_i2s.c` = 本家
   `saan_i2s.c` の移植 + `saan_ui_headless.c`）で app は約 1 MB。RISC-V なので W8A32（checksum `0xe4b645c30835d42d`）。速度は**未測定**。

@@ -1,4 +1,6 @@
 #include "saan_kanji.h"
+#include "saanotts.h"            /* saan_arena（複数ブロック） */
+#include "saanotts_internal.h"   /* saan_alloc */
 
 #include <stdio.h>
 #include <string.h>
@@ -113,6 +115,11 @@ const char *saan_kanji_strerror(saan_kanji_status s) {
     return "不明なエラー";
 }
 
+static saan_kanji_status run_after_layout(const jdict_t *d, const char *text, size_t nbytes,
+                                          void *vit, size_t vit_n,
+                                          int32_t *ids, int32_t ids_cap,
+                                          int32_t *n_ids, int *n_tokens);
+
 saan_kanji_status saan_kanji_to_ids(const jdict_t *d,
                                     const char *text, size_t nbytes,
                                     void *arena, size_t arena_n,
@@ -123,6 +130,56 @@ saan_kanji_status saan_kanji_to_ids(const jdict_t *d,
     size_t vit_n = 0;
     void *vit = layout(arena, arena_n, &vit_n);
     if (!vit || vit_n < 16u * 1024u) return SAAN_KANJI_ERR_TOO_LONG;
+    return run_after_layout(d, text, nbytes, vit, vit_n, ids, ids_cap, n_ids, n_tokens);
+}
+
+/* 複数ブロック arena 版の layout。固定長の配列を saan_alloc で 1 つずつ取り、Viterbi には
+ * 残りの最大の塊を渡す。合成と同時には走らないので arena は空の前提（reset する）。 */
+static void *layout_arena(saan_arena *a, size_t *vit_n) {
+    saan_arena_reset(a);
+    s_feat_flat = (char *)saan_alloc(a, (size_t)KJ_MAX_TOK * KJ_FEAT_MAX);
+    s_k4  = (accent_node_t *)saan_alloc(a, sizeof(accent_node_t) * KJ_MAX_TOK);
+    s_key = (char *)saan_alloc(a, (size_t)KJ_KEY_MAX);
+    s_tok = (jdict_token_t *)saan_alloc(a, sizeof(jdict_token_t) * KJ_MAX_TOK);
+    s_lab = (const char **)saan_alloc(a, sizeof(const char *) * KJ_MAX_LABEL);
+    void *k7 = saan_alloc(a, KJ_K7_SCRATCH > 0 ? KJ_K7_SCRATCH : 16);
+    if (!s_feat_flat || !s_k4 || !s_key || !s_tok || !s_lab || !k7) { *vit_n = 0; return NULL; }
+#if defined(LABEL_IDS_EXTERNAL_SCRATCH) && LABEL_IDS_EXTERNAL_SCRATCH
+    label_ids_set_scratch(k7, LABEL_IDS_SCRATCH_BYTES);
+#endif
+    for (int i = 0; i < KJ_MAX_TOK; i++) s_feat[i] = s_feat_flat + (size_t)i * KJ_FEAT_MAX;
+    /* Viterbi: 残りが最大のブロックの残り全部（16 B 単位）。first-fit なのでその塊に入る */
+    size_t best = 0;
+    for (int r = 0; r < a->n_regions; ++r) {
+        size_t rem = a->rsize[r] - a->rcur[r];
+        if (rem > best) best = rem;
+    }
+    best &= ~(size_t)15u;
+    if (best < 16u * 1024u) { *vit_n = 0; return NULL; }
+    void *vit = saan_alloc(a, best);
+    if (!vit) { *vit_n = 0; return NULL; }
+    *vit_n = best;
+    return vit;
+}
+
+saan_kanji_status saan_kanji_to_ids_arena(const jdict_t *d,
+                                          const char *text, size_t nbytes,
+                                          void *arena_obj,
+                                          int32_t *ids, int32_t ids_cap,
+                                          int32_t *n_ids, int *n_tokens) {
+    if (n_tokens) *n_tokens = 0;
+    if (nbytes >= KJ_KEY_MAX) return SAAN_KANJI_ERR_TOO_LONG;
+    size_t vit_n = 0;
+    void *vit = layout_arena((saan_arena *)arena_obj, &vit_n);
+    if (!vit) return SAAN_KANJI_ERR_TOO_LONG;
+    return run_after_layout(d, text, nbytes, vit, vit_n, ids, ids_cap, n_ids, n_tokens);
+}
+
+/* layout の後の共通部分（鍵 → Viterbi → 素性 → ids） */
+static saan_kanji_status run_after_layout(const jdict_t *d, const char *text, size_t nbytes,
+                                          void *vit, size_t vit_n,
+                                          int32_t *ids, int32_t ids_cap,
+                                          int32_t *n_ids, int *n_tokens) {
     size_t key_n = KJ_KEY_MAX;
     if (jdict_encode_key(d, (const uint8_t *)text, nbytes,
                       (uint8_t *)s_key, &key_n) != 0)
