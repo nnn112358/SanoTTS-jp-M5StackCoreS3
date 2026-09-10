@@ -106,8 +106,8 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 # | core2   | ESP32    | 8 MB       | 顔（avatar）/ text           | 内蔵 NS4168                    | 3 MB（mmap 窓 4 MB） |
 # | atoms3  | ESP32-S3 | 無し       | saan_ui_atoms3.cpp（ボタン） | Atomic Voice Base（atomic_echo）| 6.2 MB    |
 # | atoms3r | ESP32-S3 | 8 MB Octal | 同上                         | 同上                           | 6.2 MB     |
-# | basic   | ESP32    | **無し**   | 顔（avatar）/ text           | 内蔵 DAC（GPIO25）+ アンプ     | 3 MB（同上） ⚠️ arena 176 KB の連続ヒープが取れない見込み |
-# | stampc5 | ESP32-C5 | 無し       | 無し（同上のヘッドレス経路） | 外付け I2S DAC（G5/G6/G7）     | 2.4 MB（4 MB flash） |
+# | basic   | ESP32    | **無し**   | 顔（avatar）/ text           | 内蔵 DAC（GPIO25）+ アンプ     | 3 MB（同上）。arena は内部 DRAM の複数ブロック |
+# | stampc5 | ESP32-C5 | 無し       | 無し（saan_ui_headless.c）   | 外付け I2S DAC（G5/G6/G7、M5Unified 無し）| 2.9 MB（4 MB flash） |
 # sdkconfig.<ボード> / partitions_<ボード>.csv と組で使う（cores3 は sdkconfig.defaults / partitions.csv）。
 # CoreS3 の既定は何も変わらない。
 if(NOT DEFINED SAAN_BOARD)
@@ -138,7 +138,7 @@ if(SAAN_BOARD STREQUAL "stampc5")
     if(NOT DEFINED SAAN_CORE_IRAM)
         set(SAAN_CORE_IRAM 0 CACHE INTERNAL "Stamp-C5（RISC-V）はコアを flash に置く")
     endif()
-    message(STATUS "sanoTTS: ボード = Stamp-C5（ESP32-C5 / RISC-V）。W8A32 / 外付け I2S DAC / 辞書 2M")
+    message(STATUS "sanoTTS: ボード = Stamp-C5（ESP32-C5 / RISC-V）。W8A32 / M5Unified 無し / 外付け I2S DAC / 辞書 4M まで")
 endif()
 set(SAAN_UI "${SAAN_UI}" CACHE STRING "起動時の画面: avatar（顔）か text（文字）。実行時に切り替え可")
 idf_build_set_property(SAAN_UI "${SAAN_UI}")
@@ -157,7 +157,7 @@ if(NOT DEFINED SAAN_KANJI)
 endif()
 if(SAAN_KANJI)
 # 辞書は -DSAAN_DICT=44000|135000|228000|438750 で選ぶ（本家 Release の k1-dict-*.bin。scripts/get_dict.sh）。
-# 既定はボードの dict パーティションに入る最大: cores3 438750 / atoms3・atoms3r 135000 / core2・basic・stampc5 44000。
+# 既定はボードの dict パーティションに入る最大: cores3 438750 / atoms3・atoms3r・stampc5 135000 / core2・basic 44000。
 # ⚠️ パーティションに入らない組み合わせはここで止める（焼けても起動時に jdict_open が落ちる）。
 set(_saan_dict_files
     44000  "k1-dict-44000-2mb.bin"
@@ -167,7 +167,7 @@ set(_saan_dict_files
 if(NOT DEFINED SAAN_DICT)
     if(SAAN_BOARD STREQUAL "cores3")
         set(SAAN_DICT 438750)
-    elseif(SAAN_BOARD MATCHES "^(core2|basic|stampc5)$")
+    elseif(SAAN_BOARD MATCHES "^(core2|basic)$")
         set(SAAN_DICT 44000)
     else()
         set(SAAN_DICT 135000)
@@ -188,7 +188,7 @@ if(SAAN_BOARD STREQUAL "cores3")
 elseif(SAAN_BOARD MATCHES "^(core2|basic)$")
     set(_saan_dict_cap 3080192)    # partitions_core2.csv 0x2F0000
 elseif(SAAN_BOARD STREQUAL "stampc5")
-    set(_saan_dict_cap 2490368)    # partitions_stampc5.csv 0x260000
+    set(_saan_dict_cap 3014656)    # partitions_stampc5.csv 0x2E0000（本家 4 MB 版と同じ）
 else()
     set(_saan_dict_cap 6225920)    # partitions_atoms3.csv 0x5F0000
 endif()

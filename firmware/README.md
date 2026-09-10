@@ -69,10 +69,10 @@ app だけでなく表と辞書も焼き直すこと（一括イメージなら�
 | ATOMS3 + Voice Base | ESP32-S3 | 無し | 8 MB | `m5-atoms3-voicebase-kanji-dict<語数>.bin` | 入らない | 入らない | ✅ 起動確認（文字 UI。顔版は未確認） | ✅ 起動確認（同左） |
 | ATOMS3R + Voice Base | ESP32-S3 | 8 MB Octal | 8 MB | `m5-atoms3r-voicebase-kanji-dict<語数>.bin` | 入らない | 入らない | ⚠️ ビルドのみ | ⚠️ ビルドのみ |
 | Core2（W8A32） | ESP32 | 8 MB | 16 MB | `m5-core2-avatar-kanji-dict<語数>.bin` | 入らない | 入らない | ⚠️ ビルドのみ（mmap 窓に入らないかも） | ⚠️ ビルドのみ |
-| Core Basic（W8A32） | ESP32 | 無し | 16 MB | `m5-basic-avatar-kanji-dict<語数>.bin` | 入らない | 入らない | ⚠️ ビルドのみ（arena が取れない見込み） | ⚠️ ビルドのみ（同左） |
-| Stamp-C5（W8A32、外付け I2S DAC） | ESP32-C5 | 無し | 4 MB | `m5-stampc5-i2sdac-kanji-dict<語数>.bin` | 入らない | 入らない | 入らない | ⚠️ ビルドのみ |
+| Core Basic（W8A32） | ESP32 | 無し | 16 MB | `m5-basic-avatar-kanji-dict<語数>.bin` | 入らない | 入らない | ⚠️ ビルドのみ（arena は複数ブロック） | ⚠️ ビルドのみ（同左） |
+| Stamp-C5（W8A32、外付け I2S DAC、M5 無し） | ESP32-C5 | 無し | 4 MB | `m5-stampc5-i2sdac-kanji-dict<語数>.bin` | 入らない | 入らない | ⚠️ ビルドのみ | ⚠️ ビルドのみ |
 
-「入らない」= そのボードの dict パーティション（ATOMS3/ATOMS3R 6.2 MB、Core2 3 MB、Stamp-C5 2.4 MB）に収まらないので生成していない。
+「入らない」= そのボードの dict パーティション（ATOMS3/ATOMS3R 6.2 MB、Core2 / Basic 3 MB、Stamp-C5 2.9 MB）に収まらないので生成していない。
 起動確認は 2026-09-10（checksum `0xa69a7ebbb5ccb05f`）。
 
 app（`<ボード>/saanotts_cores3.bin`）はボードごとに 1 つで、辞書だけが違う。一括イメージは git に入れない

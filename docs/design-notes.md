@@ -10,7 +10,7 @@ idf.sh                      ESP-IDF v5.5.5 をクリーンな環境で有効化�
 idf_board.sh                ボードを選んで idf.py を呼ぶ（cores3 | atoms3 | atoms3r | core2 | basic | stampc5。build_<ボード>/ に分ける）
 sdkconfig.atoms3 / .atoms3r / .core2 / .basic / .stampc5   ボードごとの上書き（defaults に重ねる）。partitions_{atoms3,core2,stampc5}.csv も
 scripts/make_images.sh      板 × 辞書の一括イメージを firmware/<日付>_images/ に作る
-components/saanotts_core/   sanoTTS-jp csrc のコピー（origin/main d169e91、2026-09-04）
+components/saanotts_core/   sanoTTS-jp csrc のコピー（origin/main d169e91、2026-09-04）+ arena の複数ブロック対応（下）
   saanotts*.c fft.c         C99 推論コア（4 ファイル）。saan_prof.h（段別プロファイラ）、erf_table.h（GELU の表）
   g2p.c line.c              端末側かな G2P（saan_g2p_classify で経路判定も）と行編集
   jdict.c accent.c njd_rules.c label_ids.c   端末内漢字 G2P（旧 k1dict / k4_accent / k4b_njd / k7_label2ids）
@@ -26,6 +26,8 @@ main/
   saan_ui_impl.h            2 つの実装が振り分けに見せる内側の API（init / enter / leave / …）
   saan_ui_avatar.cpp        顔（m5stack-avatar）+ 吹き出し + リップシンク。128 x 128 は scale 0.4
   saan_ui_text.cpp          文字だけ（本家 saan_ui_m5.cpp と同じ 3 段。128 x 128 は詰め配置、画面なしは描かない）
+  saan_ui_headless.c        画面もボタンも無いボード（Stamp-C5）用のスタブ。M5 系をリンクしない
+  saan_speaker_i2s.c        M5Unified を使わない音声出力（driver/i2s_std 直叩き。本家 saan_i2s.c の移植。Stamp-C5）
   saan_console.{c,h}        シリアル `かな> ` 入力（タイムアウト付き poll。本家のコピー）
   saan_dict.{c,h}           辞書パーティションを貼る（本家のコピー。ROM_IMPL=y なら esp_mmu_map）
   saan_kanji.{c,h}          漢字文 → 音素 ID（本家のコピー。作業領域は合成 arena を借りる）
@@ -175,6 +177,27 @@ eos → stop()（再生完了を待って解放）
   監視する）は 2026-09-10 に外した。**「キューに空きができたら続きを渡す」ポーリング方式は
   途切れる**（渡した瞬間に 2 枚とも埋まっていると次の機会までに尽きる）が、本家の方式は playRaw の
   **ブロック**で空いた瞬間に渡すので、その穴は無い
+
+## arena の複数ブロック対応（コアへの独自変更）
+
+ESP32（Core2 / Basic）は静的 .bss に 176 KB が入らず、PSRAM の無い Basic では内部ヒープの連続ブロックも
+100〜127 KB 程度しか無い。そこで `saan_arena` を複数ブロックから取れるようにした（本家 csrc には無い。
+`saanotts.h` / `saanotts.c` の `saan_arena_add()`）。
+
+- 確保は **first-fit**（入る最初のブロックへ）。`used` は「生きている確保の合計」のままなので、1 本のときと
+  同じ値になり、`saan_stream_arena_used()` との突き合わせ（main.c の二重防御）も複数ブロックで効く
+- コアの mark / rollback（`mark = a->used; … a->used = mark;`、`a->used -= n`）は触っていない。次の `saan_alloc`
+  が **LIFO の履歴**（SAAN_ARENA_HIST = 128 件）を巻き戻して各ブロックのカーソルに反映する。境界に合わない
+  戻し方は粘着失敗（コアの確保は LIFO なので起きない）
+- main.c（SAAN_ARENA_HEAP）は PSRAM 1 本 → 内部 1 本 → 内部の大きい塊から最大 4 本、の順に試す。各塊には
+  SAAN_ARENA_HEAP_RESERVE（24 KB）を残す。漢字 G2P の Viterbi は連続領域が要るのでブロック 0 だけを貸す
+- ホストテスト `scripts/host/arena_regions_test.c`: 1 本 / 100+76 KB / 64 KB × 3 で PCM の FNV-1a が bit 一致、
+  used も同じ。40+40 KB は `SAAN_ERR_ARENA` で止まる
+
+```sh
+cc -std=c99 -O2 -Icomponents/saanotts_core -Imain scripts/host/arena_regions_test.c \
+   components/saanotts_core/{saanotts,saanotts_stream,fft,saanotts_int8}.c -lm -o /tmp/arena_test && /tmp/arena_test
+```
 
 ## 端末内漢字 G2P（sanoTTS-jp K トラックの取り込み）
 

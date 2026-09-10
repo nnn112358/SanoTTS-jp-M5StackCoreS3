@@ -47,7 +47,7 @@ CoreS3 以外は `./idf_board.sh <ボード> …`（[対応ボード](#対応ボ
 |---|---|---|
 | `-DSAAN_UI=avatar/text` | **avatar** | **起動時**の画面。顔と文字は両方ファームに入っていて、**長押し / ボタン B / シリアル `/ui`** で実行時に切り替えられる。avatar = m5stack-avatar の顔 + 吹き出し + リップシンク（128 x 128 では scale 0.4）/ text = 本家と同じ 3 段の文字画面（128 x 128 では詰め配置）。画面の無い stampc5 は text 固定 |
 | `-DSAAN_BOARD=cores3/core2/basic/atoms3/atoms3r/stampc5` | **cores3** | ボード（下の「対応ボード」）。`idf_board.sh <ボード>` が sdkconfig.<ボード> と組で渡す |
-| `-DSAAN_DICT=438750/228000/135000/44000` | ボードごと | 辞書 13M / 8M / 4M / 2M（本家 Release の `k1-dict-*.bin`。`scripts/get_dict.sh all` で取る）。既定はボードの dict パーティションに入る最大: cores3 438750 / atoms3・atoms3r 135000 / core2・basic・stampc5 44000。入らない組み合わせは CMake が止める |
+| `-DSAAN_DICT=438750/228000/135000/44000` | ボードごと | 辞書 13M / 8M / 4M / 2M（本家 Release の `k1-dict-*.bin`。`scripts/get_dict.sh all` で取る）。既定はボードの dict パーティションに入る最大: cores3 438750 / atoms3・atoms3r・stampc5 135000 / core2・basic 44000。入らない組み合わせは CMake が止める |
 | `-DSAAN_ENABLE_PIE=0/1` | **1**（S3） | W8A8 + ESP32-S3 の整数 SIMD (PIE)。0 = W8A32 / 移植可能 C。core2 / basic / stampc5 は PIE 命令が無いので 0 に固定。`-DSAAN_W8A8_NOPIE=1` で PIE 無しの W8A8（スカラ実装。checksum は PIE と同じ）にもできる |
 | `-DSAAN_BUFFERED=0/1` | **0** | 0 = プリロール（4 チャンク = 371 ms）後に計算しながら鳴らす / 1 = 全部貯めてから鳴らす（途切れない） |
 | `-DSAAN_BOOT_SPEAK=0/1` | **1** | 起動時に 1 文喋る |
@@ -70,9 +70,9 @@ CoreS3 以外は `./idf_board.sh <ボード> …`（[対応ボード](#対応ボ
 | **CoreS3**（既定） | S3 / 8 MB Quad / 16 MB | 顔 ⇄ 文字 | タッチ | 内蔵 AW88298 | 13M / 8M / 4M / 2M（dict 14.6 MB） | ✅ 2026-09-07〜10 |
 | **ATOMS3** | S3 / 無し / 8 MB | 顔（scale 0.4）⇄ 文字 128 x 128 | 本体ボタン | **Atomic Voice Base**（ES8311 + NS4150B。旧名 Atomic Echo Base） | 4M / 2M（dict 6.2 MB） | ✅ 2026-09-10（文字 UI で確認。顔はビルドのみ。音は人が聴いて確認すること） |
 | **ATOMS3R** | S3 / 8 MB **Octal** / 8 MB | 同上 | 本体ボタン | 同上 | 4M / 2M | ⚠️ ビルドのみ |
-| **Core Basic**（V2.6 以降） | **ESP32** / **無し** / 16 MB | 顔 ⇄ 文字 | ボタン A | 内蔵 DAC (GPIO25) + アンプ | 4M / 2M（dict 3 MB） | ⚠️ ビルドのみ。**arena 176 KB の置き場が無い見込み**（下） |
+| **Core Basic**（V2.6 以降） | **ESP32** / **無し** / 16 MB | 顔 ⇄ 文字 | ボタン A | 内蔵 DAC (GPIO25) + アンプ | 4M / 2M（dict 3 MB） | ⚠️ ビルドのみ（arena は内部 DRAM の複数ブロックから取る。下） |
 | **Core2** | **ESP32** / 8 MB / 16 MB | 顔 ⇄ 文字 | タッチ | 内蔵 NS4168 | 4M / 2M（dict 3 MB。4M は mmap の窓に入らないかもしれない） | ⚠️ ビルドのみ |
-| **Stamp-C5** | **ESP32-C5**（RISC-V）/ 無し / 4 MB | 無し | 無し（シリアル入力のみ） | **外付け I2S DAC**（BCLK G5 / WS G6 / DOUT G7。`-DSAAN_I2S_GPIO_*` で変更） | 2M（dict 2.4 MB） | ⚠️ ビルドのみ |
+| **Stamp-C5** | **ESP32-C5**（RISC-V）/ 無し / 4 MB | 無し（M5Unified / M5GFX も入れない。app 約 1 MB） | 無し（シリアル入力のみ） | **外付け I2S DAC**（driver/i2s_std 直叩き。BCLK G5 / WS G6 / DOUT G7。`-DSAAN_I2S_GPIO_*` で変更） | 4M / 2M（dict 2.9 MB。本家 4 MB 版と同じ配置） | ⚠️ ビルドのみ |
 
 CoreS3 のファイルはそのままで、ボードごとに `sdkconfig.<ボード>` / `partitions_<ボード>.csv` を足し、`-DSAAN_BOARD` で
 切り替える（`idf_board.sh` が組で渡す）。ボードごとに build ディレクトリが分かれる（`build/`、`build_atoms3/` …）。
@@ -92,11 +92,15 @@ scripts/make_images.sh                                    # 全ボード × 入�
   `external_speaker.atomic_echo` で有効にする（I2S G8/G6/G5、ES8311 は I2C G38/G39）。M5Unified は Base の
   有無を probe しないので、**Base を外すと無音のまま正常終了する**。PSRAM 無しの ATOMS3 では音声バッファ
   28 KB と Open JTalk のヒープが内部 DRAM に落ちる（起動ログの WARN は正常。1 発話後の空き 110 KB）。
-- **Core Basic**: Core2 と同じ ESP32 だが PSRAM が無い。arena 176 KB は .bss に入らず、内部ヒープの連続
-  ブロックも ESP32 では 110 KB 程度なので、**起動時に「arena を確保できない」で止まる見込み**（実機未確認）。
-  コアの arena を分割できるまでは動かない前提で、ビルド設定だけ用意してある。初代 Basic（flash 4 MB）は対象外。
+- **Core Basic**: Core2 と同じ ESP32 だが PSRAM が無い。arena 176 KB は .bss にも内部ヒープの 1 塊にも入らない
+  （ESP32 の内部 DRAM は 100〜127 KB の塊 2 つ）ので、**コアの arena を複数ブロック対応にし**（`saan_arena_add()`、
+  first-fit + LIFO 履歴。このリポジトリでの追加、本家 csrc には無い）、起動時に内部ヒープの大きい塊から最大 4 本に
+  分けて取る。ホストで 1 本 / 100+76 KB / 64 KB × 3 の PCM が bit 一致することは確認済み（`scripts/host/arena_regions_test.c`）。
+  実機では、arena 176 KB + Open JTalk のヒープ + 音声バッファ 28 KB が内部 DRAM に収まるかが未確認。
+  初代 Basic（flash 4 MB）は対象外。
 - **Stamp-C5**: 画面・スピーカー・ボタンが無いので、外付けの I2S DAC/アンプ（MAX98357A など）を G5/G6/G7 に繋ぎ、
-  シリアルから文を入れる。RISC-V なので W8A32（checksum `0xe4b645c30835d42d`）。速度は**未測定**。
+  シリアルから文を入れる。**M5Unified / M5GFX / avatar をリンクしない最小構成**（`saan_speaker_i2s.c` = 本家
+  `saan_i2s.c` の移植 + `saan_ui_headless.c`）で app は約 1 MB。RISC-V なので W8A32（checksum `0xe4b645c30835d42d`）。速度は**未測定**。
 - **Core2**: ESP32 には PIE が無いので W8A32（checksum の期待値は `0xe4b645c30835d42d`）。arena 176 KB は
   .bss に入らず PSRAM から取る（遅い。**xRT は未測定**で、ストリーミングでは途切れる前提。`-DSAAN_BUFFERED=1`
   を勧める）。flash の mmap 窓が 4 MB しかないので辞書は 3 MB まで。

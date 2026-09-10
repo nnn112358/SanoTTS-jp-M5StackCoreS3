@@ -39,17 +39,28 @@ else()
     message(FATAL_ERROR "SAAN_UI=${SAAN_UI} は不明。avatar か text を渡すこと")
 endif()
 
+# --- ボードで音声出力と画面の実装を選ぶ ---------------------------------------------------
+#
+#   stampc5（画面もスピーカーも無い）… saan_speaker_i2s.c（driver/i2s_std 直叩き）+ saan_ui_headless.c。
+#       **M5Unified / M5GFX / m5stack-avatar を参照しないのでイメージに入らない**（app 約 1 MB）。
+#   それ以外 … saan_speaker.cpp（M5.Speaker）+ 顔と文字の両方（実行時に切り替え）。
+idf_build_get_property(_saan_board_early SAAN_BOARD)
+if(_saan_board_early STREQUAL "stampc5")
+    set(SAAN_IO_SRC "saan_speaker_i2s.c" "saan_ui_headless.c")
+    set(SAAN_IO_REQ esp_driver_i2s)
+else()
+    set(SAAN_IO_SRC "saan_speaker.cpp" "saan_ui.cpp" "saan_ui_avatar.cpp" "saan_ui_text.cpp")
+    set(SAAN_IO_REQ m5stack-avatar)
+endif()
+
 idf_component_register(
     SRCS "main.c"
          "saan_model.c"
          "saan_console.c"
-         "saan_speaker.cpp"
-         "saan_ui.cpp"
-         "saan_ui_avatar.cpp"
-         "saan_ui_text.cpp"
+         ${SAAN_IO_SRC}
          ${SAAN_MAIN_K}
     INCLUDE_DIRS "."
-    REQUIRES saanotts_core m5stack-avatar esp_timer esp_driver_usb_serial_jtag esp_driver_uart esp_mm esp_partition
+    REQUIRES saanotts_core ${SAAN_IO_REQ} esp_timer esp_driver_usb_serial_jtag esp_driver_uart esp_mm esp_partition
 )
 
 target_compile_definitions(${COMPONENT_LIB} PRIVATE SAAN_UI_DEFAULT_TEXT=${SAAN_UI_DEFAULT_TEXT})
@@ -61,12 +72,10 @@ if(_saan_board_prop MATCHES "^atoms3")
     target_compile_definitions(${COMPONENT_LIB} PRIVATE SAAN_BOARD_ATOMS3=1)
     message(STATUS "sanoTTS: ボード = **${_saan_board_prop} + Atomic Voice Base**（external_speaker.atomic_echo）")
 elseif(_saan_board_prop STREQUAL "stampc5")
-    # 画面もスピーカーも無い。外付け I2S DAC のピンを saan_speaker.cpp が M5.Speaker に渡す
-    target_compile_definitions(${COMPONENT_LIB} PRIVATE SAAN_BOARD_STAMPC5=1)
-    message(STATUS "sanoTTS: ボード = **Stamp-C5**（外付け I2S DAC: BCLK G5 / WS G6 / DOUT G7。-DSAAN_I2S_GPIO_* で変更）")
+    message(STATUS "sanoTTS: ボード = **Stamp-C5**（M5Unified 無し。I2S 直叩き BCLK G5 / WS G6 / DOUT G7。-DSAAN_I2S_GPIO_* で変更）")
 elseif(_saan_board_prop MATCHES "^(core2|basic)$")
     # ESP32 は静的 DRAM が小さく arena 176 KB が .bss に入らない → 起動時にヒープから取る（main.c。PSRAM 優先）
-    # ⚠️ basic は PSRAM が無く、内部ヒープの最大連続ブロックは 176 KB に届かない見込み（起動時に止まる）
+    # basic は PSRAM が無いので、内部ヒープの大きい塊から最大 4 本に分けて取る（コアの複数ブロック arena）
     target_compile_definitions(${COMPONENT_LIB} PRIVATE SAAN_ARENA_HEAP=1)
     message(STATUS "sanoTTS: ボード = **${_saan_board_prop}**（arena はヒープ。PSRAM 優先）")
 endif()

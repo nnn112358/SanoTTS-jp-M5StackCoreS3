@@ -15,5 +15,5 @@ esptool.py --chip esp32   -p /dev/ttyUSB0 -b 460800 write_flash 0x0 firmware/202
 | atoms3 | ESP32-S3 | 無し | 8 MB | 入らない | 入らない | ✅ 起動確認（文字 UI。顔版は未確認） | ✅ 起動確認（同左） | 音は人が聴いて確認すること |
 | atoms3r | ESP32-S3 | 8 MB Octal | 8 MB | 入らない | 入らない | ⚠️ ビルドのみ | ⚠️ ビルドのみ | Octal PSRAM。ブートループなら sdkconfig.atoms3r を QUAD に |
 | core2 | ESP32 | 8 MB | 16 MB | 入らない | 入らない | ⚠️ ビルドのみ（mmap 窓に入らないかも） | ⚠️ ビルドのみ | W8A32、期待 checksum `0xe4b645c30835d42d` |
-| basic | ESP32 | 無し | 16 MB | 入らない | 入らない | ⚠️ ビルドのみ | ⚠️ ビルドのみ | W8A32。**arena 176 KB の連続ヒープが取れず起動時に止まる見込み** |
-| stampc5 | ESP32-C5 | 無し | 4 MB | 入らない | 入らない | 入らない | ⚠️ ビルドのみ | ESP32-C5（RISC-V）、W8A32、外付け I2S DAC（G5/G6/G7） |
+| basic | ESP32 | 無し | 16 MB | 入らない | 入らない | ⚠️ ビルドのみ | ⚠️ ビルドのみ | W8A32。arena は内部 DRAM の複数ブロックから取る（実機で収まるかは未確認） |
+| stampc5 | ESP32-C5 | 無し | 4 MB | 入らない | 入らない | ⚠️ ビルドのみ | ⚠️ ビルドのみ | ESP32-C5（RISC-V）、W8A32、M5Unified 無し、外付け I2S DAC（G5/G6/G7） |

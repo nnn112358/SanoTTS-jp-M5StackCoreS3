@@ -61,16 +61,6 @@ static const char *TAG = "saan_spk";
 
 #define SAAN_SPK_CH 0   /* 使う仮想チャンネル */
 
-/* Stamp-C5 の外付け I2S DAC のピン（SAAN_BOARD_STAMPC5 のときだけ使う） */
-#ifndef SAAN_I2S_GPIO_BCLK
-#define SAAN_I2S_GPIO_BCLK 5
-#endif
-#ifndef SAAN_I2S_GPIO_WS
-#define SAAN_I2S_GPIO_WS 6
-#endif
-#ifndef SAAN_I2S_GPIO_DOUT
-#define SAAN_I2S_GPIO_DOUT 7
-#endif
 
 /* リップシンク包絡の 1 ブロック（sample）。256 = 11.6 ms。lip_task の 10 ms と同じ粒度。
  * ブロック間は saan_speaker_level_now() が線形補間する。
@@ -273,24 +263,11 @@ bool saan_speaker_setup(uint32_t sample_rate) {
     cfg.internal_spk = false;
     cfg.external_speaker.atomic_echo = true;
 #endif
-#if SAAN_BOARD_STAMPC5
-    cfg.internal_spk = false;    /* 本体にスピーカーは無い。下で外付け I2S DAC のピンを渡す */
-#endif
     M5.begin(cfg);
 
     auto scfg = M5.Speaker.config();
     scfg.sample_rate = SAAN_SPK_OUT_RATE;
     scfg.stereo      = false;
-#if SAAN_BOARD_STAMPC5
-    /* Stamp-C5: 外付け I2S DAC/アンプ（MAX98357A / PCM5102 など）。既定のピンは本家 DevKit 実装
-     * （esp32/main/saan_i2s.c）と同じ BCLK G5 / WS G6 / DOUT G7。-DSAAN_I2S_GPIO_BCLK= などで変える。
-     * ⚠️ M5Unified はこのボードにスピーカーの既定を持たないので、ここで渡さないと begin() が false。 */
-    scfg.pin_bck      = SAAN_I2S_GPIO_BCLK;
-    scfg.pin_ws       = SAAN_I2S_GPIO_WS;
-    scfg.pin_data_out = SAAN_I2S_GPIO_DOUT;
-    scfg.i2s_port     = I2S_NUM_0;
-    scfg.magnification = 16;
-#endif
     /* dma_buf_len/count は既定（256 × 8 = 2,048 sample ≒ 93 ms @22.05k）のまま。
      * ⚠️ 減らすとアンダーランしやすくなる。**実機で測るまで触らない。** */
     M5.Speaker.config(scfg);

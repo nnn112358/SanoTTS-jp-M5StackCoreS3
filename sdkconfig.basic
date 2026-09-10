@@ -3,10 +3,11 @@
 # sdkconfig.defaults に重ねて使う: ./idf_board.sh basic build flash monitor
 # Core2（sdkconfig.core2）との違いは PSRAM が無いことだけ。パーティション表も同じ partitions_core2.csv。
 # ⚠️ **初代 Basic（flash 4 MB）には辞書が入らない。** 16 MB の V2.6 以降が前提。
-# ⚠️ **arena 176 KB の置き場が無い見込み。** ESP32 は静的 .bss に入らず（本家 Core2 で 65 KB 溢れ）、
-#    PSRAM も無いので内部ヒープから取るが、ESP32 の内部ヒープは連続で 110 KB 程度しか取れない。
-#    起動ログに「arena 180224 B を確保できない」と出たら、この構成ではまだ動かない（コアの arena を
-#    分割できるようになるまで）。**2026-09-10 時点でビルドのみ、実機は未確認。**
+# ⚠️ **arena 176 KB は内部 DRAM の複数ブロックから取る。** ESP32 は静的 .bss に入らず（本家 Core2 で 65 KB 溢れ）、
+#    PSRAM も無く、内部ヒープの連続ブロックは 110 KB 程度。コアの arena を複数ブロック対応にしたので
+#    （saan_arena_add、docs/design-notes.md）、起動時に大きい塊から最大 4 本に分けて取る。
+#    起動ログに「arena … を確保できない」と出たら、Open JTalk のヒープなどと合わせて内部 DRAM が足りない。
+#    **2026-09-10 時点でビルドのみ、実機は未確認。**
 # ⚠️ ESP32 には PIE が無い → W8A32（期待 checksum 0xe4b645c30835d42d）。
 CONFIG_IDF_TARGET="esp32"
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=n

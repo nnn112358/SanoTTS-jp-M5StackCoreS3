@@ -1,11 +1,12 @@
 # M5 Stamp-C5（ESP32-C5HF4: **RISC-V 単核** 240 MHz / 4 MB flash / **PSRAM 無し** / 384 KB SRAM）
 # 画面・スピーカー・ボタンは無い。音は外付けの I2S DAC/アンプ（MAX98357A など）を
-# BCLK G5 / WS G6 / DOUT G7 に繋ぐ（saan_speaker.cpp。-DSAAN_I2S_GPIO_BCLK= などで変えられる）。
+# BCLK G5 / WS G6 / DOUT G7 に繋ぐ（saan_speaker_i2s.c。-DSAAN_I2S_GPIO_BCLK= などで変えられる）。
 #
 # sdkconfig.defaults に重ねて使う: ./idf_board.sh stampc5 build flash monitor
 #   （idf_board.sh が -DIDF_TARGET=esp32c5 と -DSAAN_BOARD=stampc5 も渡す）
 # ⚠️ RISC-V なので PIE は無い → W8A32（期待 checksum 0xe4b645c30835d42d）。速度は**未測定**。
-# ⚠️ flash 4 MB: 辞書は 2M（k1-dict-44000-2mb.bin）だけ入る（partitions_stampc5.csv）。
+# ⚠️ flash 4 MB: app は M5Unified / M5GFX / avatar 無し（約 1 MB）。partitions_stampc5.csv は本家の 4 MB 版と
+#    同じ配置（factory 1088 KB / dict 2944 KB）で、辞書は 4M（k1-dict-135000-4mb.bin）まで入る。
 # ⚠️ **2026-09-10 時点でビルドのみ。実機は未確認。**
 # ⚠️ defaults の CONFIG_ESP32S3_* / SPIRAM_MODE_* は C5 には無いので無視される（警告は正常）。
 CONFIG_IDF_TARGET="esp32c5"

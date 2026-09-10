@@ -149,11 +149,33 @@ typedef char saan_arena_holds_kanji_workbytes[
 #ifndef SAAN_ARENA_HEAP
 #define SAAN_ARENA_HEAP 0
 #endif
+/* 複数ブロックで取るとき、各塊に残す余地（Open JTalk のヒープ・音声バッファ 28 KB・画面のため） */
+#ifndef SAAN_ARENA_HEAP_RESERVE
+#define SAAN_ARENA_HEAP_RESERVE (24 * 1024)
+#endif
 #if SAAN_ARENA_HEAP
-static uint8_t *g_arena;   /* tts_task の先頭で確保。16 B 境界は heap_caps_aligned_alloc が保証 */
+/* tts_task の先頭で確保。16 B 境界は heap_caps_aligned_alloc が保証。
+ * 176 KB が 1 本で取れないとき（PSRAM の無い ESP32 = Basic）は、内部ヒープの大きい塊から
+ * **複数ブロック**に分けて取り、saan_arena_add() で 1 つの arena にする（コアの複数ブロック対応）。 */
+static uint8_t *g_arena;                              /* ブロック 0（漢字 G2P の作業領域もここ） */
+static size_t   g_arena0_size;                        /* ブロック 0 の大きさ */
+static uint8_t *g_arena_r[SAAN_ARENA_MAX_REGIONS];    /* 全ブロック */
+static size_t   g_arena_rn[SAAN_ARENA_MAX_REGIONS];
+static int      g_arena_nr;
 #else
 static __attribute__((aligned(16))) uint8_t g_arena[SAAN_ARENA_BYTES];
+#define g_arena0_size ((size_t)SAAN_ARENA_BYTES)
 #endif
+
+/* 発話ごとに arena を組み立てる（1 本なら init だけ） */
+static void arena_setup(saan_arena *a) {
+#if SAAN_ARENA_HEAP
+    saan_arena_init(a, g_arena_r[0], g_arena_rn[0]);
+    for (int i = 1; i < g_arena_nr; ++i) saan_arena_add(a, g_arena_r[i], g_arena_rn[i]);
+#else
+    saan_arena_init(a, g_arena, SAAN_ARENA_BYTES);
+#endif
+}
 
 /* 1 チャンク = 8 frames × 256 = 2,048 sample = 92.88 ms。8,192 B。
  * ⚠️ **スタックに置かない。** saan_irfft_1024 の自動変数だけで 4 KB 使う。 */
@@ -272,7 +294,7 @@ static bool synth_once(const saan_weights *w, const int32_t *ids, int32_t n_ids)
     const int64_t t_begin = esp_timer_get_time();
 
     saan_arena a;
-    saan_arena_init(&a, g_arena, SAAN_ARENA_BYTES);
+    arena_setup(&a);
 
     saan_stream st;
     int64_t t_init = esp_timer_get_time();
@@ -285,7 +307,7 @@ static bool synth_once(const saan_weights *w, const int32_t *ids, int32_t n_ids)
 
     /* 二重防御（上の ⚠️）。init が OK でも黙って確保に失敗していることがある。
      * 期待値はコアが同じ確保一覧から計算する（ポインタ幅の差もターゲット側の sizeof で吸収） */
-    {
+    {   /* 複数ブロックでも used は「生きている確保の合計」なので同じ検査が効く */
         const size_t used_expect = saan_stream_arena_used(n_ids);
         if (a.used != used_expect) {
             ESP_LOGE(TAG, "saan_stream_init は OK を返したが a.used が %u B（期待 %u B）。"
@@ -301,8 +323,8 @@ static bool synth_once(const saan_weights *w, const int32_t *ids, int32_t n_ids)
     const double audio_s = (double)total / SAAN_SR;
     ESP_LOGI(TAG, "init %.2f ms / %d ids / %d frames / %u sample / 音声 %.3f s",
              (double)t_init / 1000.0, (int)n_ids, (int)st.n_frames, (unsigned)total, audio_s);
-    ESP_LOGI(TAG, "arena used %u B / peak %u B / 確保 %u B",
-             (unsigned)a.used, (unsigned)a.peak, (unsigned)SAAN_ARENA_BYTES);
+    ESP_LOGI(TAG, "arena used %u B / peak %u B / 確保 %u B（%d ブロック）",
+             (unsigned)a.used, (unsigned)a.peak, (unsigned)a.size, a.n_regions);
 
     /* --- プリロール ------------------------------------------------------
      * ⚠️ **鳴らし始める前に数チャンク計算しておく。** 最初の pull だけ定常の約 6 倍かかる
@@ -536,8 +558,9 @@ static bool speak_kanji(const saan_weights *w, const char *text, size_t nbytes) 
     int32_t n_ids = 0;
     int n_tok = 0;
     int64_t t0 = esp_timer_get_time();
+    /* ⚠️ Viterbi の作業領域は**連続**が要る。複数ブロックの arena ではブロック 0 だけを貸す */
     saan_kanji_status ks = saan_kanji_to_ids(&g_dict, text, nbytes,
-                                            g_arena, SAAN_ARENA_BYTES,
+                                            g_arena, g_arena0_size,
                                             g_ids, SAAN_G2P_IDS_CAP, &n_ids, &n_tok);
     int64_t dt = esp_timer_get_time() - t0;
     if (ks != SAAN_KANJI_OK) {
@@ -689,25 +712,57 @@ static void print_usage(void) {
 static void tts_task(void *arg) {
     (void)arg;
 #if SAAN_ARENA_HEAP
-    g_arena = (uint8_t *)heap_caps_aligned_alloc(16, SAAN_ARENA_BYTES,
-                                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    /* 1) PSRAM に 1 本（Core2）。2) 内部 DRAM に 1 本。3) 内部 DRAM の大きい塊から複数ブロック（Basic）。
+     * ⚠️ 3) は「他の確保（Open JTalk のヒープ、音声バッファ 28 KB、画面）の余地」を SAAN_ARENA_HEAP_RESERVE
+     *    だけ残す。足りなければ起動時にここで止まる（黙って小さくしない）。 */
+    g_arena = (uint8_t *)heap_caps_aligned_alloc(16, SAAN_ARENA_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (g_arena) {
         ESP_LOGW(TAG, "arena %d B を **PSRAM** に確保 (%p)。合成は遅くなる（速度の測定には使わない）",
                  (int)SAAN_ARENA_BYTES, (void *)g_arena);
+        g_arena_r[0] = g_arena; g_arena_rn[0] = SAAN_ARENA_BYTES; g_arena_nr = 1;
     } else {
-        g_arena = (uint8_t *)heap_caps_aligned_alloc(16, SAAN_ARENA_BYTES,
-                                                     MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        if (!g_arena) {
-            ESP_LOGE(TAG, "arena %d B を確保できない（PSRAM も内部 DRAM も）", (int)SAAN_ARENA_BYTES);
-            vTaskDelete(NULL); return;
+        g_arena = (uint8_t *)heap_caps_aligned_alloc(16, SAAN_ARENA_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (g_arena) {
+            ESP_LOGI(TAG, "arena %d B を内部 DRAM のヒープに 1 本で確保 (%p)", (int)SAAN_ARENA_BYTES, (void *)g_arena);
+            g_arena_r[0] = g_arena; g_arena_rn[0] = SAAN_ARENA_BYTES; g_arena_nr = 1;
+        } else {
+            size_t got = 0;
+            while (got < (size_t)SAAN_ARENA_BYTES && g_arena_nr < SAAN_ARENA_MAX_REGIONS) {
+                size_t blk = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+                if (blk <= SAAN_ARENA_HEAP_RESERVE) break;
+                blk -= SAAN_ARENA_HEAP_RESERVE;                   /* 他の確保の余地 */
+                blk &= ~(size_t)15u;
+                if (blk > (size_t)SAAN_ARENA_BYTES - got) blk = ((size_t)SAAN_ARENA_BYTES - got + 15u) & ~(size_t)15u;
+                if (blk < 4096) break;
+                uint8_t *p = (uint8_t *)heap_caps_aligned_alloc(16, blk, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+                if (!p) break;
+                g_arena_r[g_arena_nr] = p; g_arena_rn[g_arena_nr] = blk; ++g_arena_nr;
+                got += blk;
+                ESP_LOGI(TAG, "arena ブロック %d: %u B (%p)", g_arena_nr, (unsigned)blk, (void *)p);
+            }
+            if (got < (size_t)SAAN_ARENA_BYTES) {
+                ESP_LOGE(TAG, "arena %d B を確保できない（PSRAM 無し。内部 DRAM から %u B / %d ブロックしか取れない）",
+                         (int)SAAN_ARENA_BYTES, (unsigned)got, g_arena_nr);
+                vTaskDelete(NULL); return;
+            }
+            g_arena = g_arena_r[0];
+            ESP_LOGW(TAG, "arena %u B を内部 DRAM の **%d ブロック**に分けて確保した（複数ブロック arena）",
+                     (unsigned)got, g_arena_nr);
         }
-        ESP_LOGI(TAG, "arena %d B を内部 DRAM のヒープに確保 (%p)", (int)SAAN_ARENA_BYTES, (void *)g_arena);
     }
+    g_arena0_size = g_arena_rn[0];
+#if SAAN_KANJI
+    if (g_arena0_size < SAAN_KANJI_WORKBYTES)
+        ESP_LOGE(TAG, "arena のブロック 0（%u B）が漢字 G2P の作業領域（%u B）より小さい。漢字経路は失敗する",
+                 (unsigned)g_arena0_size, (unsigned)SAAN_KANJI_WORKBYTES);
+#endif
 #endif
     log_heap("起動直後");
     log_mmap_room();
+#if !SAAN_ARENA_HEAP
     ESP_LOGI(TAG, "arena %d B を .bss に静的確保 (%p) / G2P の ids %d B",
              (int)SAAN_ARENA_BYTES, (void *)g_arena, (int)sizeof g_ids);
+#endif
 
     static saan_weights w;
     if (!saan_model_open(&w)) { vTaskDelete(NULL); return; }

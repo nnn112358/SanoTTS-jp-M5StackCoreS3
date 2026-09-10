@@ -59,11 +59,23 @@ typedef struct {
     uint32_t version;
 } saan_weights;
 
-/* 作業領域。**コアは malloc しない** */
+/* 作業領域。**コアは malloc しない**
+ *
+ * **複数ブロック**（SanoTTS-jp-M5Stack で追加。本家 csrc には無い）:
+ *   `saan_arena_init()` で 1 本目、`saan_arena_add()` で 2 本目以降を足す（最大 SAAN_ARENA_MAX_REGIONS）。
+ *   `saan_alloc` は**入る最初のブロック**に置く（first-fit）。`used` は「いま生きている確保の合計」の
+ *   ままなので、1 本のときと同じ値になり、`saan_stream_arena_used()` との突き合わせもそのまま効く。
+ *   mark / rollback（`mark = a->used; … a->used = mark;` や `a->used -= n`）は次の `saan_alloc` で
+ *   履歴（LIFO）を巻き戻して各ブロックのカーソルに反映する。**コアの確保は LIFO**（それ以外の
+ *   戻し方をすると粘着失敗になる）。
+ *   なぜ要るか: ESP32（Core2 / Basic）は内部 DRAM の空きが 100〜127 KB の塊 2 つに分かれていて、
+ *   176 KB の連続領域が取れない。 */
+#define SAAN_ARENA_MAX_REGIONS 4
+#define SAAN_ARENA_HIST 128     /* 同時に生きている確保の上限（stream_init で約 30、pull 中の一時確保で +数個） */
 typedef struct {
-    uint8_t *buf;
-    size_t size;
-    size_t used;
+    uint8_t *buf;        /* ブロック 0（互換のため残す。= rbuf[0]） */
+    size_t size;         /* 全ブロックの合計 */
+    size_t used;         /* 生きている確保の合計（16 B 切り上げ後）。mark / rollback で戻る */
     /* 高水位。`used` は mark/rollback で戻るので、**一時確保を見落とさない**
      * ためにこちらで測る（W8A8 の activation 作業領域がそれ）。init で 0 に戻る */
     size_t peak;
@@ -73,6 +85,16 @@ typedef struct {
      * init が成功を返したまま NULL を抱える**（実際に踏んだ。arena 175〜191 KB の
      * 15 サイズで再現）。ESP32 では「ログ無しで再起動」に化ける */
     int failed;
+    /* 複数ブロック */
+    int      n_regions;
+    uint8_t *rbuf[SAAN_ARENA_MAX_REGIONS];
+    size_t   rsize[SAAN_ARENA_MAX_REGIONS];
+    size_t   rcur[SAAN_ARENA_MAX_REGIONS];    /* ブロックごとのカーソル */
+    /* 確保の履歴（LIFO）。rollback を各ブロックのカーソルに反映するため */
+    size_t   hist_total;                       /* 履歴の合計（= 直前の saan_alloc 時点の used） */
+    uint16_t hist_n;
+    uint8_t  hist_r[SAAN_ARENA_HIST];
+    uint32_t hist_sz[SAAN_ARENA_HIST];
 } saan_arena;
 
 /* 1 発話の中間結果へのポインタ（すべて arena 上） */
@@ -95,6 +117,8 @@ const void *saan_tensor(const saan_weights *w, const char *name,
                         uint32_t *dtype, uint32_t dims[4], uint64_t *nbytes);
 
 void saan_arena_init(saan_arena *a, void *buf, size_t size);
+/* ブロックを足す（init の後）。16 B 境界の buf を渡すこと。入り切らなければ -1 */
+int  saan_arena_add(saan_arena *a, void *buf, size_t size);
 void saan_arena_reset(saan_arena *a);
 
 /* n_ids トークンを合成するのに必要な arena バイト数（上限）。

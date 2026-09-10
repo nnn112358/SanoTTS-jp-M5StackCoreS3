@@ -1,11 +1,12 @@
 # sanoTTS-jp / M5 Stamp-C5 のパーティション表（**4 MB** flash、端末内漢字 G2P つき）
 #
-# factory 1.6 MB（app は約 1.4 MB。顔は無いが M5GFX のフォントと Open JTalk が入る）、
-# dict 2.4 MB → 入るのは k1-dict-44000-2mb.bin（977,456 B）だけ。
+# 本家の 4 MB 版（esp32s3-firmware-kanji-4mb.bin）と同じ配置: factory 1088 KB / dict 2944 KB。
+# Stamp-C5 の app は M5Unified / M5GFX / avatar を持たない（saan_ui_headless.c + saan_speaker_i2s.c）ので
+# 約 1 MB に収まり、dict 2944 KB には k1-dict-135000-4mb.bin（3,006,656 B。4M 辞書）が入る。
 # ⚠️ **`dict` の offset は 64 KB (0x10000) 境界に置くこと**（mmap のページ境界）。
 #
 # Name,   Type, SubType, Offset,   Size,     Flags
 nvs,      data, nvs,     0x9000,   0x6000,
 phy_init, data, phy,     0xf000,   0x1000,
-factory,  app,  factory, 0x10000,  0x190000,
-dict,     data, 0x41,    0x1A0000, 0x260000,
+factory,  app,  factory, 0x10000,  0x110000,
+dict,     data, 0x41,    0x120000, 0x2E0000,

@@ -93,13 +93,32 @@ const float *saan_tf(const saan_weights *w, const char *fmt, ...) {
 
 /* --- arena --------------------------------------------------------------- */
 
+static void arena_clear(saan_arena *a) {
+    a->used = 0; a->failed = 0;
+    for (int r = 0; r < a->n_regions; ++r) a->rcur[r] = 0;
+    a->hist_total = 0; a->hist_n = 0;
+}
+
 void saan_arena_init(saan_arena *a, void *buf, size_t size) {
-    a->buf = (uint8_t *)buf; a->size = size; a->used = 0; a->peak = 0;
-    a->failed = 0;
+    a->buf = (uint8_t *)buf; a->size = size; a->peak = 0;
+    a->n_regions = 1;
+    a->rbuf[0] = (uint8_t *)buf; a->rsize[0] = size;
+    arena_clear(a);
+}
+
+int saan_arena_add(saan_arena *a, void *buf, size_t size) {
+    if (a->n_regions >= SAAN_ARENA_MAX_REGIONS || buf == NULL || size == 0) return -1;
+    const int r = a->n_regions;
+    a->rbuf[r]  = (uint8_t *)buf;
+    a->rsize[r] = size;
+    a->rcur[r]  = 0;
+    a->size    += size;
+    a->n_regions = r + 1;
+    return 0;
 }
 /* ⚠️ `peak` は**戻さない**（発話をまたいだ高水位を測るため）。0 に戻すのは init。
  * `failed` は**戻す** — 次の発話は小さいかもしれない */
-void saan_arena_reset(saan_arena *a) { a->used = 0; a->failed = 0; }
+void saan_arena_reset(saan_arena *a) { arena_clear(a); }
 
 void *saan_alloc(saan_arena *a, size_t n) {
     size_t need = ALIGN16(n);
@@ -108,11 +127,32 @@ void *saan_alloc(saan_arena *a, size_t n) {
      * 最後の 1 個しか NULL 検査していない呼び出し側で
      * **init が成功を返したまま NULL を抱える**（arena 175〜191 KB の 15 サイズで実測）。 */
     if (a->failed) return NULL;
-    if (a->used + need > a->size) { a->failed = 1; return NULL; }
-    void *p = a->buf + a->used;
-    a->used += need;
-    if (a->used > a->peak) a->peak = a->used;
-    return p;
+    /* 呼び出し側が `used` を戻していたら（mark / rollback / `used -= n`）、履歴を LIFO で巻き戻して
+     * 各ブロックのカーソルに反映する。境界に合わない戻し方は粘着失敗（コアの確保は LIFO）。 */
+    while (a->hist_n > 0 && a->hist_total > a->used) {
+        --a->hist_n;
+        const int r = a->hist_r[a->hist_n];
+        const size_t sz = a->hist_sz[a->hist_n];
+        a->rcur[r] -= sz;
+        a->hist_total -= sz;
+    }
+    if (a->hist_total != a->used) { a->failed = 1; return NULL; }
+    if (a->hist_n >= SAAN_ARENA_HIST) { a->failed = 1; return NULL; }
+    /* 入る最初のブロックへ（first-fit） */
+    for (int r = 0; r < a->n_regions; ++r) {
+        if (a->rcur[r] + need > a->rsize[r]) continue;
+        void *p = a->rbuf[r] + a->rcur[r];
+        a->rcur[r] += need;
+        a->hist_r[a->hist_n] = (uint8_t)r;
+        a->hist_sz[a->hist_n] = (uint32_t)need;
+        ++a->hist_n;
+        a->hist_total += need;
+        a->used += need;
+        if (a->used > a->peak) a->peak = a->used;
+        return p;
+    }
+    a->failed = 1;
+    return NULL;
 }
 
 size_t saan_arena_needed(int32_t n_ids) {
