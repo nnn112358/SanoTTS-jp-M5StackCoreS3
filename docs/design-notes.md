@@ -22,10 +22,10 @@ main/
   main.c                    起動 → セルフテスト → 表示 → 発話 → 入力/タッチのループ（経路判定は speak_auto）
   saan_model.{c,h}          .rodata の重み blob を開く（v2 でないと SAAN_ERR_VERSION）
   saan_speaker.{h,cpp}      M5.Speaker 出力（22.05 kHz 直接。プリロール + 3 枚リング = 本家 M5 実装と同じ。PCM 統計とリップシンク包絡もここ）
-  saan_ui.h                 画面とタッチの API（実装は -DSAAN_UI=avatar|text で選ぶ）
-  saan_ui_avatar.cpp        顔（m5stack-avatar）+ 吹き出し + リップシンク（既定）
-  saan_ui_text.cpp          文字だけ（M5GFX。文 / 出典 / ステータス。avatar をリンクしない）
-  saan_ui_atoms3.cpp        ATOMS3 の 128 x 128 文字表示 + 本体ボタン（-DSAAN_BOARD=atoms3 で選ばれる）
+  saan_ui.h saan_ui.cpp     画面と入力の API と振り分け（顔 ⇄ 文字を実行時に切り替え。長押し / ボタン B / `/ui`）
+  saan_ui_impl.h            2 つの実装が振り分けに見せる内側の API（init / enter / leave / …）
+  saan_ui_avatar.cpp        顔（m5stack-avatar）+ 吹き出し + リップシンク。128 x 128 は scale 0.4
+  saan_ui_text.cpp          文字だけ（本家 saan_ui_m5.cpp と同じ 3 段。128 x 128 は詰め配置、画面なしは描かない）
   saan_console.{c,h}        シリアル `かな> ` 入力（タイムアウト付き poll。本家のコピー）
   saan_dict.{c,h}           辞書パーティションを貼る（本家のコピー。ROM_IMPL=y なら esp_mmu_map）
   saan_kanji.{c,h}          漢字文 → 音素 ID（本家のコピー。作業領域は合成 arena を借りる）
@@ -112,11 +112,13 @@ NOTICE.md  LICENSES/        帰属表示とライセンス全文
 
 ## 顔とリップシンク（m5stack-avatar）
 
-画面の実装は 2 つあり、**ビルド（書き込み）時に `-DSAAN_UI=avatar|text` で選ぶ**（`main/CMakeLists.txt`）。
+画面の実装は 2 つあり、**両方がファームに入っていて実行時に切り替える**（`saan_ui.cpp` が振り分け。長押し /
+ボタン B / シリアル `/ui`。`-DSAAN_UI=avatar|text` は起動時にどちらを出すか）。
 既定の `avatar` は [m5stack-avatar](https://github.com/stack-chan/m5stack-avatar)（`components/m5stack-avatar/`、
 MIT、v0.10.0 を vendored）が描く。文は吹き出し（右下）に出す。
-`text` は `saan_ui_text.cpp`（M5GFX だけ。上段に文、下段にステータス、中段に出典）で、avatar コンポーネントを
-REQUIRES から外すので描画タスクもリップシンクも無く、合成タスクからだけ描く。以下は `avatar` の話。
+`text` は `saan_ui_text.cpp`（M5GFX だけ。上段に文、下段にステータス、中段に出典 = 本家と同じ）で、合成タスクからだけ
+描く。文字画面の間は avatar の drawLoop を suspend しておき（facialLoop と lip_task は回るが描かない）、顔に戻すと
+resume で画面全体を描き直す。以下は `avatar` の話。
 
 ```
 合成タスク (core 0, 優先度 1)            avatar drawLoop (10 ms) / facialLoop (33 ms) / lip_task (core 1)

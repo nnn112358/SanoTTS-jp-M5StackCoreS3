@@ -8,7 +8,8 @@ ESP-IDF プロジェクト。クラウド不要。**CoreS3**（既定）のほ�
 - 起動すると `今日は良い天気ですね。` を喋る。画面のあるボードでは [m5stack-avatar](https://github.com/stack-chan/m5stack-avatar)
   の顔が出て、吹き出しに文を出しながら**口が音量に合わせて動く**（ATOMS3 / ATOMS3R は 128 x 128 に縮小）。
   Stamp-C5 は画面なし
-- **画面をタッチ**（ATOMS3 / Basic は本体ボタン）すると直前の文をもう一度喋る
+- **画面を短くタッチ**（ATOMS3 / Basic は本体ボタン A）すると直前の文をもう一度喋る
+- **長押し**（またはボタン B、シリアルの `/ui`）で **顔 ⇄ 本家と同じ文字画面** を切り替える（1 つのファームに両方入っている）
 - USB シリアルの `かな> ` に**漢字かな交じり文をそのまま**打つと、その文を喋る
   （端末内の辞書 + Open JTalk の NJD 鎖で読みとアクセントを付ける。辞書は flash に合わせて
   13M / 8M / 4M / 2M の 4 種から選ぶ）。
@@ -44,7 +45,7 @@ CoreS3 以外は `./idf_board.sh <ボード> …`（[対応ボード](#対応ボ
 
 | フラグ | 既定 | 意味 |
 |---|---|---|
-| `-DSAAN_UI=avatar/text/atoms3` | **avatar** | 画面。avatar = m5stack-avatar の顔 + 吹き出し + リップシンク（128 x 128 では scale 0.4）/ text = 文字だけ（320 x 240 の 3 段）/ atoms3 = 128 x 128 の文字だけ。stampc5 は atoms3（ヘッドレス）が既定 |
+| `-DSAAN_UI=avatar/text` | **avatar** | **起動時**の画面。顔と文字は両方ファームに入っていて、**長押し / ボタン B / シリアル `/ui`** で実行時に切り替えられる。avatar = m5stack-avatar の顔 + 吹き出し + リップシンク（128 x 128 では scale 0.4）/ text = 本家と同じ 3 段の文字画面（128 x 128 では詰め配置）。画面の無い stampc5 は text 固定 |
 | `-DSAAN_BOARD=cores3/core2/basic/atoms3/atoms3r/stampc5` | **cores3** | ボード（下の「対応ボード」）。`idf_board.sh <ボード>` が sdkconfig.<ボード> と組で渡す |
 | `-DSAAN_DICT=438750/228000/135000/44000` | ボードごと | 辞書 13M / 8M / 4M / 2M（本家 Release の `k1-dict-*.bin`。`scripts/get_dict.sh all` で取る）。既定はボードの dict パーティションに入る最大: cores3 438750 / atoms3・atoms3r 135000 / core2・basic・stampc5 44000。入らない組み合わせは CMake が止める |
 | `-DSAAN_ENABLE_PIE=0/1` | **1**（S3） | W8A8 + ESP32-S3 の整数 SIMD (PIE)。0 = W8A32 / 移植可能 C。core2 / basic / stampc5 は PIE 命令が無いので 0 に固定。`-DSAAN_W8A8_NOPIE=1` で PIE 無しの W8A8（スカラ実装。checksum は PIE と同じ）にもできる |
@@ -59,22 +60,18 @@ CoreS3 以外は `./idf_board.sh <ボード> …`（[対応ボード](#対応ボ
 （`esptool.py write_flash 0x0 …` で焼く。辞書込みの一括イメージは大きいので git には入れず、
 `scripts/make_images.sh` で作る）。
 
-`-D` の値は `build/` を消すまで CMake キャッシュに残る。顔と文字表示を行き来するなら build ディレクトリを分ける:
-
-```sh
-./idf.sh -p /dev/ttyACM0 flash monitor                                                # 顔（既定、build/）
-./idf.sh -B build_text -DSDKCONFIG=build_text/sdkconfig -DSAAN_UI=text -p /dev/ttyACM0 flash monitor   # 文字だけ
-```
+`-D` の値は `build/` を消すまで CMake キャッシュに残る。顔と文字画面は 1 つのファームに両方入っているので、
+焼き直さずに切り替えられる（長押し / ボタン B / `/ui`）。`-DSAAN_UI=text` は起動時に文字画面を出す指定。
 
 ### 対応ボード
 
 | ボード | チップ / PSRAM / flash | 画面 | もう一度喋る | スピーカー | 辞書（13M=438750 / 8M=228000 / 4M=135000 / 2M=44000 語） | 実機確認 |
 |---|---|---|---|---|---|---|
-| **CoreS3**（既定） | S3 / 8 MB Quad / 16 MB | 顔（avatar）か text | タッチ | 内蔵 AW88298 | 13M / 8M / 4M / 2M（dict 14.6 MB） | ✅ 2026-09-07〜10 |
-| **ATOMS3** | S3 / 無し / 8 MB | 顔（avatar、scale 0.4）か文字（`saan_ui_atoms3.cpp`） | 本体ボタン | **Atomic Voice Base**（ES8311 + NS4150B。旧名 Atomic Echo Base） | 4M / 2M（dict 6.2 MB） | ✅ 2026-09-10（文字 UI で確認。顔はビルドのみ。音は人が聴いて確認すること） |
+| **CoreS3**（既定） | S3 / 8 MB Quad / 16 MB | 顔 ⇄ 文字 | タッチ | 内蔵 AW88298 | 13M / 8M / 4M / 2M（dict 14.6 MB） | ✅ 2026-09-07〜10 |
+| **ATOMS3** | S3 / 無し / 8 MB | 顔（scale 0.4）⇄ 文字 128 x 128 | 本体ボタン | **Atomic Voice Base**（ES8311 + NS4150B。旧名 Atomic Echo Base） | 4M / 2M（dict 6.2 MB） | ✅ 2026-09-10（文字 UI で確認。顔はビルドのみ。音は人が聴いて確認すること） |
 | **ATOMS3R** | S3 / 8 MB **Octal** / 8 MB | 同上 | 本体ボタン | 同上 | 4M / 2M | ⚠️ ビルドのみ |
-| **Core Basic**（V2.6 以降） | **ESP32** / **無し** / 16 MB | 顔（avatar）か text | ボタン A | 内蔵 DAC (GPIO25) + アンプ | 4M / 2M（dict 3 MB） | ⚠️ ビルドのみ。**arena 176 KB の置き場が無い見込み**（下） |
-| **Core2** | **ESP32** / 8 MB / 16 MB | 顔（avatar）か text | タッチ | 内蔵 NS4168 | 4M / 2M（dict 3 MB。4M は mmap の窓に入らないかもしれない） | ⚠️ ビルドのみ |
+| **Core Basic**（V2.6 以降） | **ESP32** / **無し** / 16 MB | 顔 ⇄ 文字 | ボタン A | 内蔵 DAC (GPIO25) + アンプ | 4M / 2M（dict 3 MB） | ⚠️ ビルドのみ。**arena 176 KB の置き場が無い見込み**（下） |
+| **Core2** | **ESP32** / 8 MB / 16 MB | 顔 ⇄ 文字 | タッチ | 内蔵 NS4168 | 4M / 2M（dict 3 MB。4M は mmap の窓に入らないかもしれない） | ⚠️ ビルドのみ |
 | **Stamp-C5** | **ESP32-C5**（RISC-V）/ 無し / 4 MB | 無し | 無し（シリアル入力のみ） | **外付け I2S DAC**（BCLK G5 / WS G6 / DOUT G7。`-DSAAN_I2S_GPIO_*` で変更） | 2M（dict 2.4 MB） | ⚠️ ビルドのみ |
 
 CoreS3 のファイルはそのままで、ボードごとに `sdkconfig.<ボード>` / `partitions_<ボード>.csv` を足し、`-DSAAN_BOARD` で

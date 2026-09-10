@@ -119,12 +119,10 @@ endif()
 set(SAAN_BOARD "${SAAN_BOARD}" CACHE STRING "ボード: cores3 | core2 | basic | atoms3 | atoms3r | stampc5")
 idf_build_set_property(SAAN_BOARD "${SAAN_BOARD}")
 
+# 起動時の画面（avatar | text）。両方ファームに入り、実行時に切り替えられる（main/CMakeLists.txt）。
+# 画面の無い stampc5 は実行時に text 固定になる。
 if(NOT DEFINED SAAN_UI)
-    if(SAAN_BOARD STREQUAL "stampc5")
-        set(SAAN_UI "atoms3")   # 画面が無い。saan_ui_atoms3.cpp が width()==0 で描画を飛ばす（ヘッドレス）
-    else()
-        set(SAAN_UI "avatar")
-    endif()
+    set(SAAN_UI "avatar")
 endif()
 
 # ESP32（Core2）: PIE 命令が無い → W8A32。arena 176 KB が .bss に入らない → PSRAM（SAAN_ARENA_HEAP）。
@@ -142,7 +140,7 @@ if(SAAN_BOARD STREQUAL "stampc5")
     endif()
     message(STATUS "sanoTTS: ボード = Stamp-C5（ESP32-C5 / RISC-V）。W8A32 / 外付け I2S DAC / 辞書 2M")
 endif()
-set(SAAN_UI "${SAAN_UI}" CACHE STRING "画面の実装: avatar（顔）か text（文字だけ）")
+set(SAAN_UI "${SAAN_UI}" CACHE STRING "起動時の画面: avatar（顔）か text（文字）。実行時に切り替え可")
 idf_build_set_property(SAAN_UI "${SAAN_UI}")
 
 project(saanotts_cores3)

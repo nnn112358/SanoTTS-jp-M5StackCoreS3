@@ -1,6 +1,9 @@
-/* 顔とタッチ — m5stack-avatar 版。設計は saan_ui.h を読むこと。
+/* 顔 — m5stack-avatar 版。saan_ui_impl_avatar として saan_ui.cpp に渡す。設計は saan_ui.h /
+ * saan_ui_impl.h を読むこと。入力（タッチ / ボタン）はここでは扱わない（saan_ui.cpp）。
  *
- * avatar.init() が描画タスク（drawLoop 優先度 1 / facialLoop 優先度 2）を core 1 に作る。
+ * 最初の enter() で avatar.init() が描画タスク（drawLoop 優先度 1 / facialLoop 優先度 2）を core 1 に作る。
+ * 文字画面へ切り替えるときは leave() が drawLoop を suspend し（facialLoop と lip_task は回り続けるが
+ * 描かない）、戻るときは resume() で顔が画面全体を描き直す。
  * リップシンクの lip_task も core 1（優先度 2）。合成タスクは core 0（main.c）。
  * ⚠️ **合成タスクと同じ core に置かない。** 合成は数秒間 CPU を手放さないので、
  *    同じ core の低優先度タスクは止まる（顔が固まる）。
@@ -15,14 +18,16 @@
 #include "freertos/task.h"
 
 #include "saan_speaker.h"
-#include "saan_ui.h"
+#include "saan_ui_impl.h"
 
 using namespace m5avatar;
 
 static const char *TAG = "saan_ui";
 
 static Avatar s_avatar;
-static bool   s_ready;
+static bool   s_ready;     /* init 済み */
+static bool   s_started;   /* 描画タスクを作った（最初の enter） */
+static bool   s_small;     /* 128 x 128 */
 
 /* 吹き出しの文。UTF-8 で SAAN_UI_TEXT_CHARS 文字に切り詰める（吹き出しは右下に
  * 固定幅なので、長い行は顔を覆う）。 */
@@ -55,32 +60,43 @@ static void lip_task(void *arg) {
     }
 }
 
-bool saan_ui_init(void) {
-    if (M5.getBoard() == m5::board_t::board_unknown) {
-        ESP_LOGE(TAG, "M5.begin() がまだ。saan_speaker_setup() の後に呼ぶこと");
+static bool avatar_init(void) {
+    if (M5.Display.width() == 0) {
+        ESP_LOGE(TAG, "画面が無いボードで顔は出せない");
         return false;
     }
     s_avatar.setSpeechFont(&fonts::lgfxJapanGothic_16);
     /* 小さい画面（ATOMS3 / ATOMS3R の 128 x 128）は顔を縮める。値は m5stack-avatar の AtomS3 例と同じ
      * （scale 0.4、320 x 240 の顔を左上へ寄せる）。顔のスプライトは 1 bit（init の既定）なので
      * PSRAM の無い ATOMS3 でも 128 x 128 / 8 = 2 KB。 */
-    const bool small = M5.Display.width() <= 128;
-    if (small) {
+    s_small = M5.Display.width() <= 128;
+    if (s_small) {
         s_avatar.setScale(0.4f);
         s_avatar.setPosition(-56, -96);
     }
-    s_avatar.init();   /* drawLoop / facialLoop を core 1 に作る */
-    s_avatar.addTask(lip_task, "lipSync", 2048, 2, NULL, APP_CPU_NUM);
     s_ready = true;
-    ESP_LOGI(TAG, "m5stack-avatar 起動（core %d）/ 画面 %d x %d%s / 吹き出し lgfxJapanGothic_16 / リップシンク %d ms / "
-                  "もう一度は%s",
-             (int)APP_CPU_NUM, (int)M5.Display.width(), (int)M5.Display.height(),
-             small ? "（scale 0.4）" : "", (int)SAAN_LIP_PERIOD_MS,
-             M5.Touch.isEnabled() ? "タッチ" : "ボタン A");
     return true;
 }
 
-void saan_ui_set_text(const char *text) {
+static void avatar_enter(void) {
+    if (!s_ready) return;
+    if (!s_started) {
+        s_avatar.init();   /* drawLoop / facialLoop を core 1 に作る */
+        s_avatar.addTask(lip_task, "lipSync", 2048, 2, NULL, APP_CPU_NUM);
+        s_started = true;
+        ESP_LOGI(TAG, "m5stack-avatar 起動（core %d）/ 画面 %d x %d%s / 吹き出し lgfxJapanGothic_16 / リップシンク %d ms",
+                 (int)APP_CPU_NUM, (int)M5.Display.width(), (int)M5.Display.height(),
+                 s_small ? "（scale 0.4）" : "", (int)SAAN_LIP_PERIOD_MS);
+    } else {
+        s_avatar.resume();   /* drawLoop を再開。次のフレームで画面全体を描き直す */
+    }
+}
+
+static void avatar_leave(void) {
+    if (s_started) s_avatar.suspend();   /* drawLoop だけ止める。文字画面が上書きする */
+}
+
+static void avatar_set_text(const char *text) {
     if (text == NULL) { s_text[0] = '\0'; return; }
     size_t n = strlen(text), i = 0, chars = 0;
     while (i < n && chars < SAAN_UI_TEXT_CHARS) {
@@ -95,53 +111,34 @@ void saan_ui_set_text(const char *text) {
     if (i < n) strcat(s_text, "…");
 }
 
-void saan_ui_thinking(void) {
+static void avatar_thinking(void) {
     if (!s_ready) return;
     s_avatar.setExpression(Expression::Doubt);
     s_avatar.setMouthOpenRatio(0.0f);
     s_avatar.setSpeechText("…");
 }
 
-void saan_ui_speaking(void) {
+static void avatar_speaking(void) {
     if (!s_ready) return;
     s_lip_frames = 0; s_lip_open = 0; s_lip_max = 0.0f;
     s_avatar.setExpression(Expression::Happy);
     s_avatar.setSpeechText(s_text);
 }
 
-void saan_ui_idle(const char *status) {
+static void avatar_idle(const char *status) {
     if (!s_ready) return;
     s_avatar.setExpression(Expression::Neutral);
     s_avatar.setMouthOpenRatio(0.0f);
-    /* タッチの無いボード（ATOMS3 / Basic）では言い換える */
-    if (status != NULL && !M5.Touch.isEnabled() && strcmp(status, "タッチでもう一度") == 0)
-        status = "ボタンでもう一度";
     s_avatar.setSpeechText(status != NULL ? status : "");
 }
 
-/* タッチ（CoreS3 / Core2）か本体のボタン A（ATOMS3 の画面押し込み / Basic の左ボタン）。
- * ⚠️ CoreS3 では画面下端のタッチが仮想 BtnA にもなるが、1 回の update で両方が立っても
- *    返すのは 1 回なので二重には鳴らない。 */
-bool saan_ui_poll_touch(void) {
-    if (!s_ready) return false;
-    M5.update();
-    const auto n = M5.Touch.getCount();
-    for (size_t i = 0; i < n; ++i) {
-        const auto t = M5.Touch.getDetail(i);
-        if (t.wasPressed()) {
-            ESP_LOGI(TAG, "タッチ x=%d y=%d", (int)t.x, (int)t.y);
-            return true;
-        }
-    }
-    if (M5.BtnA.wasPressed()) {
-        ESP_LOGI(TAG, "ボタン A");
-        return true;
-    }
-    return false;
-}
-
-void saan_ui_lip_stats(uint32_t *frames, uint32_t *frames_open, float *max_ratio) {
+static void avatar_lip_stats(uint32_t *frames, uint32_t *frames_open, float *max_ratio) {
     if (frames) *frames = s_lip_frames;
     if (frames_open) *frames_open = s_lip_open;
     if (max_ratio) *max_ratio = s_lip_max;
 }
+
+extern "C" const saan_ui_impl_t saan_ui_impl_avatar = {
+    "avatar", avatar_init, avatar_enter, avatar_leave, avatar_set_text,
+    avatar_thinking, avatar_speaking, avatar_idle, avatar_lip_stats,
+};

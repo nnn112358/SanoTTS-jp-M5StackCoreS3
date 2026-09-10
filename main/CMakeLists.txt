@@ -17,22 +17,12 @@ if(SAAN_KANJI)
     set(SAAN_MAIN_K "saan_dict.c" "saan_kanji.c")
 endif()
 
-# --- 画面の実装を選ぶ（**書き込み時に切り替える**）------------------------------
+# --- 画面 --------------------------------------------------------------------
 #
-#     ./idf.sh -DSAAN_UI=avatar build flash    顔（m5stack-avatar）+ 吹き出し + リップシンク（既定）
-#     ./idf.sh -DSAAN_UI=text   build flash    文字だけ（M5GFX。文 / 出典 / ステータスの 3 段）
-#
-# どちらも main/saan_ui.h の同じ API を実装する（main.c は違いを知らない）。
-# text では m5stack-avatar コンポーネントを REQUIRES から外す。IDF は components/ にある
-# コンポーネントをコンパイルはするが、誰も要求しないのでイメージにはオブジェクトが 1 つも
-# 入らない（build_text の .map で `libm5stack-avatar.a(` が 0 件、顔ビルドは 935 件。実測）。
-# 描画タスク 2 本 + リップシンクタスクも無い。
+# 顔（saan_ui_avatar.cpp）と文字（saan_ui_text.cpp）は**両方**入り、saan_ui.cpp が実行時に切り替える
+# （長押し / ボタン B / シリアル `/ui`）。-DSAAN_UI=avatar|text は**起動時にどちらを出すか**だけ
+# （既定 avatar。画面の無いボードは text 固定）。旧 `atoms3` は text の別名。
 # ⚠️ **CMake のキャッシュに残る。** 一度 -D で渡した値は build/ を消すまで有効。
-#    2 種類を行き来するなら build ディレクトリを分けるのが楽:
-#     ./idf.sh -B build_text -DSDKCONFIG=build_text/sdkconfig -DSAAN_UI=text build flash
-# ⚠️ 値はビルドプロパティから読む（トップの CMakeLists.txt が -D の値を idf_build_set_property で
-#    載せている）。早期展開ではキャッシュ変数 SAAN_UI が見えないため、ここで `if(NOT DEFINED SAAN_UI)`
-#    と既定を決めると text を渡しても REQUIRES が avatar で固まる（実際に踏んだ）。
 idf_build_get_property(_saan_ui_prop SAAN_UI)
 if(_saan_ui_prop)
     set(SAAN_UI "${_saan_ui_prop}")
@@ -40,17 +30,11 @@ elseif(NOT DEFINED SAAN_UI)
     set(SAAN_UI "avatar")
 endif()
 if(SAAN_UI STREQUAL "avatar")
-    set(SAAN_UI_SRC "saan_ui_avatar.cpp")
-    set(SAAN_UI_REQ m5stack-avatar)
-    message(STATUS "sanoTTS: 画面 = **顔**（m5stack-avatar + リップシンク）— 文字だけなら -DSAAN_UI=text")
-elseif(SAAN_UI STREQUAL "text")
-    set(SAAN_UI_SRC "saan_ui_text.cpp")
-    set(SAAN_UI_REQ "")
-    message(STATUS "sanoTTS: 画面 = **文字表示**（M5GFX のみ。m5stack-avatar はリンクしない）— 顔なら -DSAAN_UI=avatar")
-elseif(SAAN_UI STREQUAL "atoms3")
-    set(SAAN_UI_SRC "saan_ui_atoms3.cpp")
-    set(SAAN_UI_REQ "")
-    message(STATUS "sanoTTS: 画面 = **ATOMS3**（128 x 128 文字表示 + ボタン A。m5stack-avatar はリンクしない）")
+    set(SAAN_UI_DEFAULT_TEXT 0)
+    message(STATUS "sanoTTS: 起動時の画面 = **顔**（長押し / ボタン B / `/ui` で文字へ）")
+elseif(SAAN_UI STREQUAL "text" OR SAAN_UI STREQUAL "atoms3")
+    set(SAAN_UI_DEFAULT_TEXT 1)
+    message(STATUS "sanoTTS: 起動時の画面 = **文字**（長押し / ボタン B / `/ui` で顔へ）")
 else()
     message(FATAL_ERROR "SAAN_UI=${SAAN_UI} は不明。avatar か text を渡すこと")
 endif()
@@ -60,11 +44,15 @@ idf_component_register(
          "saan_model.c"
          "saan_console.c"
          "saan_speaker.cpp"
-         ${SAAN_UI_SRC}
+         "saan_ui.cpp"
+         "saan_ui_avatar.cpp"
+         "saan_ui_text.cpp"
          ${SAAN_MAIN_K}
     INCLUDE_DIRS "."
-    REQUIRES saanotts_core ${SAAN_UI_REQ} esp_timer esp_driver_usb_serial_jtag esp_driver_uart esp_mm esp_partition
+    REQUIRES saanotts_core m5stack-avatar esp_timer esp_driver_usb_serial_jtag esp_driver_uart esp_mm esp_partition
 )
+
+target_compile_definitions(${COMPONENT_LIB} PRIVATE SAAN_UI_DEFAULT_TEXT=${SAAN_UI_DEFAULT_TEXT})
 
 # --- ボード（-DSAAN_BOARD=atoms3 で saan_speaker.cpp が Atomic Voice Base を有効にする）------------
 # ⚠️ トップの CMakeLists.txt がビルドプロパティに載せている（SAAN_UI と同じ理由）。

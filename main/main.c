@@ -682,7 +682,7 @@ static void print_usage(void) {
     ESP_LOGI(TAG, "⚠️ 中間表現の記号が混じったまま読めない行は拒否する（例: きょ][おわ…です°ね。）。");
     ESP_LOGI(TAG, "⚠️ アクセント記号を省くと平板になる。**音は出るが正しい抑揚ではない。**");
     ESP_LOGI(TAG, "編集: BS/DEL 1 文字消す / Ctrl-U 行を消す / 上限 %d ids", (int)SAAN_MAX_IDS);
-    ESP_LOGI(TAG, "画面をタッチすると直前の文をもう一度喋る。");
+    ESP_LOGI(TAG, "画面（かボタン A）を短く押すと直前の文をもう一度喋る。長押し / ボタン B / `/ui` で顔 ⇄ 文字。");
     ESP_LOGI(TAG, "====================================================");
 }
 
@@ -780,7 +780,7 @@ static void tts_task(void *arg) {
             /* 行が完成していない間はタッチを見る。**合成中はここに来ない**ので、
              * 合成中に何度触っても、戻ってきたときの 1 回ぶんにまとまる。 */
             if (saan_ui_poll_touch() && g_last_n_ids > 0) {
-                ESP_LOGI(TAG, "タッチ → もう一度: \"%s\" (%d ids)", g_last_text, (int)g_last_n_ids);
+                ESP_LOGI(TAG, "もう一度: \"%s\" (%d ids)", g_last_text, (int)g_last_n_ids);
                 (void)synth_once(&w, g_ids, g_last_n_ids);
             }
             continue;
@@ -800,6 +800,12 @@ static void tts_task(void *arg) {
          * ⚠️ **前置記号は試験用の強制だけに残してある**: `=` でかな中間表現（判定を通さずに
          *    saan_g2p に渡す。旧仕様との互換）、`!` で辞書経路（本家と同じ。「同じ行を無理やり
          *    辞書経路に流したらどうなるか」を測るのに要る）。 */
+        if (n == 3 && strcmp(line, "/ui") == 0) {
+            saan_ui_toggle();
+            ESP_LOGI(TAG, "画面: %s", saan_ui_mode());
+            saan_console_prompt();
+            continue;
+        }
         if (n > 0 && line[0] == '=') {
             ESP_LOGI(TAG, "経路: かな（`=` による強制）");
             (void)speak_line(&w, line + 1, (size_t)n - 1);
