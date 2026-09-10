@@ -12,7 +12,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-boards="${1:-cores3 atoms3 atoms3r core2 stampc5}"
+boards="${1:-cores3 atoms3 atoms3r core2 basic stampc5}"
 dicts="${2:-44000 135000 228000 438750}"
 OUT="${OUT:-firmware/$(date +%F)_images}"
 
@@ -24,6 +24,7 @@ dict_file() { case "$1" in
 board_info() { case "$1" in
   cores3)  echo "partitions.csv 16MB m5-cores3-avatar" ;;
   core2)   echo "partitions_core2.csv 16MB m5-core2-avatar" ;;
+  basic)   echo "partitions_core2.csv 16MB m5-basic-avatar" ;;
   atoms3)  echo "partitions_atoms3.csv 8MB m5-atoms3-voicebase" ;;
   atoms3r) echo "partitions_atoms3.csv 8MB m5-atoms3r-voicebase" ;;
   stampc5) echo "partitions_stampc5.csv 4MB m5-stampc5-i2sdac" ;;
@@ -39,7 +40,7 @@ for b in $boards; do
     cap=$(grep -E '^dict' "$csv" | awk -F, '{gsub(/ /,"",$5); print $5}'); cap=$((cap))
     off=$(grep -E '^dict' "$csv" | awk -F, '{gsub(/ /,"",$4); print $4}')
     bdir="build"; [ "$b" != cores3 ] && bdir="build_$b"
-    chip=esp32s3; [ "$b" = core2 ] && chip=esp32; [ "$b" = stampc5 ] && chip=esp32c5
+    chip=esp32s3; [ "$b" = core2 ] || [ "$b" = basic ] && chip=esp32; [ "$b" = stampc5 ] && chip=esp32c5
     echo "=== $b: ビルド（$bdir）"
     ./idf_board.sh "$b" build > "$OUT/build_$b.log" 2>&1 || { tail -30 "$OUT/build_$b.log"; exit 1; }
     mkdir -p "$OUT/$b"

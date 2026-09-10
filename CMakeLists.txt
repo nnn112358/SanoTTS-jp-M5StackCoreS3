@@ -67,13 +67,13 @@ set(SAAN_MODEL_BLOB "${SAAN_MODEL_BLOB}" CACHE INTERNAL "重み blob の絶対�
 # ⚠️ **CMake のキャッシュに残る。** 一度 -D で渡した値は build/ を消すまで有効。
 # ⚠️ SAAN_BOARD はこの下（project() の前）で決まるが、PIE の既定はボードが要るので先に読む。
 if(NOT DEFINED SAAN_ENABLE_PIE)
-    if(SAAN_BOARD MATCHES "^(core2|stampc5)$")
+    if(SAAN_BOARD MATCHES "^(core2|basic|stampc5)$")
         set(SAAN_ENABLE_PIE 0)   # ESP32 / ESP32-C5 に PIE は無い
     else()
         set(SAAN_ENABLE_PIE 1)
     endif()
 endif()
-if(SAAN_ENABLE_PIE AND SAAN_BOARD MATCHES "^(core2|stampc5)$")
+if(SAAN_ENABLE_PIE AND SAAN_BOARD MATCHES "^(core2|basic|stampc5)$")
     message(FATAL_ERROR "${SAAN_BOARD} に PIE 命令は無い（ESP32-S3 だけ）。-DSAAN_ENABLE_PIE=0 で")
 endif()
 set(SAAN_ENABLE_PIE "${SAAN_ENABLE_PIE}" CACHE INTERNAL "W8A8 + PIE を使うか")
@@ -106,21 +106,22 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 # | core2   | ESP32    | 8 MB       | 顔（avatar）/ text           | 内蔵 NS4168                    | 3 MB（mmap 窓 4 MB） |
 # | atoms3  | ESP32-S3 | 無し       | saan_ui_atoms3.cpp（ボタン） | Atomic Voice Base（atomic_echo）| 6.2 MB    |
 # | atoms3r | ESP32-S3 | 8 MB Octal | 同上                         | 同上                           | 6.2 MB     |
+# | basic   | ESP32    | **無し**   | 顔（avatar）/ text           | 内蔵 DAC（GPIO25）+ アンプ     | 3 MB（同上） ⚠️ arena 176 KB の連続ヒープが取れない見込み |
 # | stampc5 | ESP32-C5 | 無し       | 無し（同上のヘッドレス経路） | 外付け I2S DAC（G5/G6/G7）     | 2.4 MB（4 MB flash） |
 # sdkconfig.<ボード> / partitions_<ボード>.csv と組で使う（cores3 は sdkconfig.defaults / partitions.csv）。
 # CoreS3 の既定は何も変わらない。
 if(NOT DEFINED SAAN_BOARD)
     set(SAAN_BOARD "cores3")
 endif()
-if(NOT SAAN_BOARD MATCHES "^(cores3|core2|atoms3|atoms3r|stampc5)$")
-    message(FATAL_ERROR "SAAN_BOARD=${SAAN_BOARD} は不明。cores3 | core2 | atoms3 | atoms3r | stampc5")
+if(NOT SAAN_BOARD MATCHES "^(cores3|core2|basic|atoms3|atoms3r|stampc5)$")
+    message(FATAL_ERROR "SAAN_BOARD=${SAAN_BOARD} は不明。cores3 | core2 | basic | atoms3 | atoms3r | stampc5")
 endif()
-set(SAAN_BOARD "${SAAN_BOARD}" CACHE STRING "ボード: cores3 | core2 | atoms3 | atoms3r | stampc5")
+set(SAAN_BOARD "${SAAN_BOARD}" CACHE STRING "ボード: cores3 | core2 | basic | atoms3 | atoms3r | stampc5")
 idf_build_set_property(SAAN_BOARD "${SAAN_BOARD}")
 
 if(NOT DEFINED SAAN_UI)
-    if(SAAN_BOARD MATCHES "^atoms3" OR SAAN_BOARD STREQUAL "stampc5")
-        set(SAAN_UI "atoms3")   # stampc5 は画面が無いが、同じ実装が width()==0 で描画を飛ばす
+    if(SAAN_BOARD STREQUAL "stampc5")
+        set(SAAN_UI "atoms3")   # 画面が無い。saan_ui_atoms3.cpp が width()==0 で描画を飛ばす（ヘッドレス）
     else()
         set(SAAN_UI "avatar")
     endif()
@@ -128,11 +129,11 @@ endif()
 
 # ESP32（Core2）: PIE 命令が無い → W8A32。arena 176 KB が .bss に入らない → PSRAM（SAAN_ARENA_HEAP）。
 # IRAM も小さいので推論コアは flash のまま。
-if(SAAN_BOARD STREQUAL "core2")
+if(SAAN_BOARD MATCHES "^(core2|basic)$")
     if(NOT DEFINED SAAN_CORE_IRAM)
-        set(SAAN_CORE_IRAM 0 CACHE INTERNAL "Core2 は IRAM が小さいのでコアを flash に置く")
+        set(SAAN_CORE_IRAM 0 CACHE INTERNAL "ESP32 は IRAM が小さいのでコアを flash に置く")
     endif()
-    message(STATUS "sanoTTS: ボード = Core2（ESP32）。W8A32 / arena は PSRAM / コアは flash")
+    message(STATUS "sanoTTS: ボード = ${SAAN_BOARD}（ESP32）。W8A32 / arena はヒープ（PSRAM 優先） / コアは flash")
 endif()
 # ESP32-C5（Stamp-C5）: RISC-V なので PIE 無し（W8A32）。linker.lf の IRAM 配置は Xtensa 向けなので使わない。
 if(SAAN_BOARD STREQUAL "stampc5")
@@ -158,7 +159,7 @@ if(NOT DEFINED SAAN_KANJI)
 endif()
 if(SAAN_KANJI)
 # 辞書は -DSAAN_DICT=44000|135000|228000|438750 で選ぶ（本家 Release の k1-dict-*.bin。scripts/get_dict.sh）。
-# 既定はボードの dict パーティションに入る最大: cores3 438750 / atoms3・atoms3r 135000 / core2・stampc5 44000。
+# 既定はボードの dict パーティションに入る最大: cores3 438750 / atoms3・atoms3r 135000 / core2・basic・stampc5 44000。
 # ⚠️ パーティションに入らない組み合わせはここで止める（焼けても起動時に jdict_open が落ちる）。
 set(_saan_dict_files
     44000  "k1-dict-44000-2mb.bin"
@@ -168,7 +169,7 @@ set(_saan_dict_files
 if(NOT DEFINED SAAN_DICT)
     if(SAAN_BOARD STREQUAL "cores3")
         set(SAAN_DICT 438750)
-    elseif(SAAN_BOARD MATCHES "^(core2|stampc5)$")
+    elseif(SAAN_BOARD MATCHES "^(core2|basic|stampc5)$")
         set(SAAN_DICT 44000)
     else()
         set(SAAN_DICT 135000)
@@ -186,7 +187,7 @@ if(NOT DEFINED SAAN_DICT_BLOB)
 endif()
 if(SAAN_BOARD STREQUAL "cores3")
     set(_saan_dict_cap 14614528)   # partitions.csv 0xDF0000
-elseif(SAAN_BOARD STREQUAL "core2")
+elseif(SAAN_BOARD MATCHES "^(core2|basic)$")
     set(_saan_dict_cap 3080192)    # partitions_core2.csv 0x2F0000
 elseif(SAAN_BOARD STREQUAL "stampc5")
     set(_saan_dict_cap 2490368)    # partitions_stampc5.csv 0x260000

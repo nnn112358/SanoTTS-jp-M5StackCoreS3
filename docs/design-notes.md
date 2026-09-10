@@ -7,8 +7,8 @@ CMakeLists.txt              PIE 既定 ON、blob のパス、COMPONENTS=main、�
 partitions.csv              16 MB flash / factory 2 MB / dict 14.6 MB（重みは app の .rodata に入る）
 sdkconfig.defaults          CoreS3（Quad PSRAM / USB Serial-JTAG / QIO / D-cache 64 KB・64 B 行）+ sanoTTS 向け設定
 idf.sh                      ESP-IDF v5.5.5 をクリーンな環境で有効化して idf.py を呼ぶ
-idf_board.sh                ボードを選んで idf.py を呼ぶ（cores3 | atoms3 | atoms3r | core2。build_<ボード>/ に分ける）
-sdkconfig.atoms3 / .atoms3r / .core2   ボードごとの上書き（defaults に重ねる）。partitions_atoms3.csv / partitions_core2.csv も
+idf_board.sh                ボードを選んで idf.py を呼ぶ（cores3 | atoms3 | atoms3r | core2 | basic | stampc5。build_<ボード>/ に分ける）
+sdkconfig.atoms3 / .atoms3r / .core2 / .basic / .stampc5   ボードごとの上書き（defaults に重ねる）。partitions_{atoms3,core2,stampc5}.csv も
 scripts/make_images.sh      板 × 辞書の一括イメージを firmware/<日付>_images/ に作る
 components/saanotts_core/   sanoTTS-jp csrc のコピー（origin/main d169e91、2026-09-04）
   saanotts*.c fft.c         C99 推論コア（4 ファイル）。saan_prof.h（段別プロファイラ）、erf_table.h（GELU の表）

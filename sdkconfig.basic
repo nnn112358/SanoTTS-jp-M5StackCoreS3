@@ -1,0 +1,20 @@
+# M5Stack Core Basic（V2.6 / V2.7: **ESP32** / 16 MB flash / **PSRAM 無し** / 内蔵 DAC (GPIO25) + アンプ / ボタン A/B/C）
+#
+# sdkconfig.defaults に重ねて使う: ./idf_board.sh basic build flash monitor
+# Core2（sdkconfig.core2）との違いは PSRAM が無いことだけ。パーティション表も同じ partitions_core2.csv。
+# ⚠️ **初代 Basic（flash 4 MB）には辞書が入らない。** 16 MB の V2.6 以降が前提。
+# ⚠️ **arena 176 KB の置き場が無い見込み。** ESP32 は静的 .bss に入らず（本家 Core2 で 65 KB 溢れ）、
+#    PSRAM も無いので内部ヒープから取るが、ESP32 の内部ヒープは連続で 110 KB 程度しか取れない。
+#    起動ログに「arena 180224 B を確保できない」と出たら、この構成ではまだ動かない（コアの arena を
+#    分割できるようになるまで）。**2026-09-10 時点でビルドのみ、実機は未確認。**
+# ⚠️ ESP32 には PIE が無い → W8A32（期待 checksum 0xe4b645c30835d42d）。
+CONFIG_IDF_TARGET="esp32"
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=n
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_SPIRAM=n
+# コンソールは UART0（CP2104 の USB-UART ブリッジ。/dev/ttyUSB0）
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=n
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_core2.csv"

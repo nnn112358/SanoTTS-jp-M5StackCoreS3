@@ -52,7 +52,7 @@ app だけでなく表と辞書も焼き直すこと（一括イメージなら�
 本家 M5 実装に合わせた版）に組み込んだもの。辞書 1 種につき 0x0 に焼く一括イメージ 1 本。app・表は共通
 （表は 16 MB のまま）。⚠️ **実機では未確認。** 詳細は [`2026-09-10_smallflash-dicts/README.md`](2026-09-10_smallflash-dicts/README.md)。
 
-## 2026-09-10_images/ — 5 ボード × 辞書の一括イメージ（`scripts/make_images.sh` の出力）
+## 2026-09-10_images/ — 6 ボード × 辞書の一括イメージ（`scripts/make_images.sh` の出力）
 
 辞書は本家の呼び名で 13M / 8M / 4M / 2M（想定 flash 容量）。ファイル名は語数:
 
@@ -66,9 +66,10 @@ app だけでなく表と辞書も焼き直すこと（一括イメージなら�
 | ボード | チップ | PSRAM | Flash | イメージ（0x0 に焼く） | 辞書 13M | 辞書 8M | 辞書 4M | 辞書 2M |
 |---|---|---|---|---|---|---|---|---|
 | CoreS3 | ESP32-S3 | 8 MB Quad | 16 MB | `m5-cores3-avatar-kanji-dict<語数>.bin` | ✅ 確認済み（2026-09-07 の配置と同じ） | 生成（未確認） | ✅ 起動確認 | ✅ 起動確認 |
-| ATOMS3 + Voice Base | ESP32-S3 | 無し | 8 MB | `m5-atoms3-voicebase-kanji-dict<語数>.bin` | 入らない | 入らない | ✅ 起動確認 | ✅ 起動確認 |
+| ATOMS3 + Voice Base | ESP32-S3 | 無し | 8 MB | `m5-atoms3-voicebase-kanji-dict<語数>.bin` | 入らない | 入らない | ✅ 起動確認（文字 UI。顔版は未確認） | ✅ 起動確認（同左） |
 | ATOMS3R + Voice Base | ESP32-S3 | 8 MB Octal | 8 MB | `m5-atoms3r-voicebase-kanji-dict<語数>.bin` | 入らない | 入らない | ⚠️ ビルドのみ | ⚠️ ビルドのみ |
 | Core2（W8A32） | ESP32 | 8 MB | 16 MB | `m5-core2-avatar-kanji-dict<語数>.bin` | 入らない | 入らない | ⚠️ ビルドのみ（mmap 窓に入らないかも） | ⚠️ ビルドのみ |
+| Core Basic（W8A32） | ESP32 | 無し | 16 MB | `m5-basic-avatar-kanji-dict<語数>.bin` | 入らない | 入らない | ⚠️ ビルドのみ（arena が取れない見込み） | ⚠️ ビルドのみ（同左） |
 | Stamp-C5（W8A32、外付け I2S DAC） | ESP32-C5 | 無し | 4 MB | `m5-stampc5-i2sdac-kanji-dict<語数>.bin` | 入らない | 入らない | 入らない | ⚠️ ビルドのみ |
 
 「入らない」= そのボードの dict パーティション（ATOMS3/ATOMS3R 6.2 MB、Core2 3 MB、Stamp-C5 2.4 MB）に収まらないので生成していない。

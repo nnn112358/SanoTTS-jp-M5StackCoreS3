@@ -61,11 +61,22 @@ bool saan_ui_init(void) {
         return false;
     }
     s_avatar.setSpeechFont(&fonts::lgfxJapanGothic_16);
+    /* 小さい画面（ATOMS3 / ATOMS3R の 128 x 128）は顔を縮める。値は m5stack-avatar の AtomS3 例と同じ
+     * （scale 0.4、320 x 240 の顔を左上へ寄せる）。顔のスプライトは 1 bit（init の既定）なので
+     * PSRAM の無い ATOMS3 でも 128 x 128 / 8 = 2 KB。 */
+    const bool small = M5.Display.width() <= 128;
+    if (small) {
+        s_avatar.setScale(0.4f);
+        s_avatar.setPosition(-56, -96);
+    }
     s_avatar.init();   /* drawLoop / facialLoop を core 1 に作る */
     s_avatar.addTask(lip_task, "lipSync", 2048, 2, NULL, APP_CPU_NUM);
     s_ready = true;
-    ESP_LOGI(TAG, "m5stack-avatar 起動（core %d）/ 吹き出し lgfxJapanGothic_16 / リップシンク %d ms",
-             (int)APP_CPU_NUM, (int)SAAN_LIP_PERIOD_MS);
+    ESP_LOGI(TAG, "m5stack-avatar 起動（core %d）/ 画面 %d x %d%s / 吹き出し lgfxJapanGothic_16 / リップシンク %d ms / "
+                  "もう一度は%s",
+             (int)APP_CPU_NUM, (int)M5.Display.width(), (int)M5.Display.height(),
+             small ? "（scale 0.4）" : "", (int)SAAN_LIP_PERIOD_MS,
+             M5.Touch.isEnabled() ? "タッチ" : "ボタン A");
     return true;
 }
 
@@ -102,9 +113,15 @@ void saan_ui_idle(const char *status) {
     if (!s_ready) return;
     s_avatar.setExpression(Expression::Neutral);
     s_avatar.setMouthOpenRatio(0.0f);
+    /* タッチの無いボード（ATOMS3 / Basic）では言い換える */
+    if (status != NULL && !M5.Touch.isEnabled() && strcmp(status, "タッチでもう一度") == 0)
+        status = "ボタンでもう一度";
     s_avatar.setSpeechText(status != NULL ? status : "");
 }
 
+/* タッチ（CoreS3 / Core2）か本体のボタン A（ATOMS3 の画面押し込み / Basic の左ボタン）。
+ * ⚠️ CoreS3 では画面下端のタッチが仮想 BtnA にもなるが、1 回の update で両方が立っても
+ *    返すのは 1 回なので二重には鳴らない。 */
 bool saan_ui_poll_touch(void) {
     if (!s_ready) return false;
     M5.update();
@@ -115,6 +132,10 @@ bool saan_ui_poll_touch(void) {
             ESP_LOGI(TAG, "タッチ x=%d y=%d", (int)t.x, (int)t.y);
             return true;
         }
+    }
+    if (M5.BtnA.wasPressed()) {
+        ESP_LOGI(TAG, "ボタン A");
+        return true;
     }
     return false;
 }

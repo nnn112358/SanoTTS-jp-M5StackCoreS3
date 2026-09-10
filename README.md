@@ -2,13 +2,13 @@
 
 日本語 TTS **[sanoTTS-jp](https://github.com/ayutaz/sanoTTS-jp)**（559 K params の蒸留モデル、
 [arXiv:2608.21378](https://arxiv.org/abs/2608.21378) の日本語版）を **M5Stack 単体**で動かす
-ESP-IDF プロジェクト。クラウド不要。**CoreS3**（既定）のほか **Core2 / ATOMS3 / ATOMS3R / Stamp-C5** で
+ESP-IDF プロジェクト。クラウド不要。**CoreS3**（既定）のほか **Core2 / Core Basic / ATOMS3 / ATOMS3R / Stamp-C5** で
 ビルドできる（[対応ボード](#対応ボード)。実機で確かめたのは CoreS3 と ATOMS3）。
 
-- 起動すると `今日は良い天気ですね。` を喋る。CoreS3 / Core2 では [m5stack-avatar](https://github.com/stack-chan/m5stack-avatar)
-  の顔が出て、吹き出しに文を出しながら**口が音量に合わせて動く**。ATOMS3 / ATOMS3R は 128 x 128 の文字表示、
+- 起動すると `今日は良い天気ですね。` を喋る。画面のあるボードでは [m5stack-avatar](https://github.com/stack-chan/m5stack-avatar)
+  の顔が出て、吹き出しに文を出しながら**口が音量に合わせて動く**（ATOMS3 / ATOMS3R は 128 x 128 に縮小）。
   Stamp-C5 は画面なし
-- **画面をタッチ**（ATOMS3 は本体ボタン）すると直前の文をもう一度喋る
+- **画面をタッチ**（ATOMS3 / Basic は本体ボタン）すると直前の文をもう一度喋る
 - USB シリアルの `かな> ` に**漢字かな交じり文をそのまま**打つと、その文を喋る
   （端末内の辞書 + Open JTalk の NJD 鎖で読みとアクセントを付ける。辞書は flash に合わせて
   13M / 8M / 4M / 2M の 4 種から選ぶ）。
@@ -23,7 +23,7 @@ ESP-IDF プロジェクト。クラウド不要。**CoreS3**（既定）のほ�
 
 | | |
 |---|---|
-| ボード | **M5Stack CoreS3**（既定）/ Core2 / ATOMS3 / ATOMS3R / Stamp-C5（[対応ボード](#対応ボード)）。Tab5 は [別リポジトリ](https://github.com/nnn112358/SanoTTS-jp-Tab5) |
+| ボード | **M5Stack CoreS3**（既定）/ Core2 / Core Basic / ATOMS3 / ATOMS3R / Stamp-C5（[対応ボード](#対応ボード)）。Tab5 は [別リポジトリ](https://github.com/nnn112358/SanoTTS-jp-Tab5) |
 | ESP-IDF | **v5.5.5**（`~/esp/esp-idf` に置く前提。`idf.sh` 参照） |
 | Python | `uv`（ビルド時のヘッダ生成に使う。stdlib のみ） |
 | ネットワーク | 初回ビルドで M5Unified / M5GFX を Component Registry から取得 |
@@ -44,10 +44,10 @@ CoreS3 以外は `./idf_board.sh <ボード> …`（[対応ボード](#対応ボ
 
 | フラグ | 既定 | 意味 |
 |---|---|---|
-| `-DSAAN_UI=avatar/text` | **avatar** | 画面。avatar = m5stack-avatar の顔 + 吹き出し + リップシンク / text = 文字だけ（文・出典・ステータスの 3 段。avatar はリンクしない） |
-| `-DSAAN_BOARD=cores3/core2/atoms3/atoms3r/stampc5` | **cores3** | ボード（下の「対応ボード」）。`idf_board.sh <ボード>` が sdkconfig.<ボード> と組で渡す |
-| `-DSAAN_DICT=438750/228000/135000/44000` | ボードごと | 辞書 13M / 8M / 4M / 2M（本家 Release の `k1-dict-*.bin`。`scripts/get_dict.sh all` で取る）。既定はボードの dict パーティションに入る最大: cores3 438750 / atoms3・atoms3r 135000 / core2・stampc5 44000。入らない組み合わせは CMake が止める |
-| `-DSAAN_ENABLE_PIE=0/1` | **1**（S3） | W8A8 + ESP32-S3 の整数 SIMD (PIE)。0 = W8A32 / 移植可能 C。core2 / stampc5 は PIE 命令が無いので 0 に固定 |
+| `-DSAAN_UI=avatar/text/atoms3` | **avatar** | 画面。avatar = m5stack-avatar の顔 + 吹き出し + リップシンク（128 x 128 では scale 0.4）/ text = 文字だけ（320 x 240 の 3 段）/ atoms3 = 128 x 128 の文字だけ。stampc5 は atoms3（ヘッドレス）が既定 |
+| `-DSAAN_BOARD=cores3/core2/basic/atoms3/atoms3r/stampc5` | **cores3** | ボード（下の「対応ボード」）。`idf_board.sh <ボード>` が sdkconfig.<ボード> と組で渡す |
+| `-DSAAN_DICT=438750/228000/135000/44000` | ボードごと | 辞書 13M / 8M / 4M / 2M（本家 Release の `k1-dict-*.bin`。`scripts/get_dict.sh all` で取る）。既定はボードの dict パーティションに入る最大: cores3 438750 / atoms3・atoms3r 135000 / core2・basic・stampc5 44000。入らない組み合わせは CMake が止める |
+| `-DSAAN_ENABLE_PIE=0/1` | **1**（S3） | W8A8 + ESP32-S3 の整数 SIMD (PIE)。0 = W8A32 / 移植可能 C。core2 / basic / stampc5 は PIE 命令が無いので 0 に固定。`-DSAAN_W8A8_NOPIE=1` で PIE 無しの W8A8（スカラ実装。checksum は PIE と同じ）にもできる |
 | `-DSAAN_BUFFERED=0/1` | **0** | 0 = プリロール（4 チャンク = 371 ms）後に計算しながら鳴らす / 1 = 全部貯めてから鳴らす（途切れない） |
 | `-DSAAN_BOOT_SPEAK=0/1` | **1** | 起動時に 1 文喋る |
 | `-DSAAN_KANJI=0/1` | **1** | 端末内漢字 G2P（辞書 + Open JTalk）。0 で外すと入力はかな中間表現だけ、辞書も焼かない |
@@ -71,8 +71,9 @@ CoreS3 以外は `./idf_board.sh <ボード> …`（[対応ボード](#対応ボ
 | ボード | チップ / PSRAM / flash | 画面 | もう一度喋る | スピーカー | 辞書（13M=438750 / 8M=228000 / 4M=135000 / 2M=44000 語） | 実機確認 |
 |---|---|---|---|---|---|---|
 | **CoreS3**（既定） | S3 / 8 MB Quad / 16 MB | 顔（avatar）か text | タッチ | 内蔵 AW88298 | 13M / 8M / 4M / 2M（dict 14.6 MB） | ✅ 2026-09-07〜10 |
-| **ATOMS3** | S3 / 無し / 8 MB | 文字 128 x 128（`saan_ui_atoms3.cpp`） | 本体ボタン | **Atomic Voice Base**（ES8311 + NS4150B。旧名 Atomic Echo Base） | 4M / 2M（dict 6.2 MB） | ✅ 2026-09-10（音は人が聴いて確認すること） |
+| **ATOMS3** | S3 / 無し / 8 MB | 顔（avatar、scale 0.4）か文字（`saan_ui_atoms3.cpp`） | 本体ボタン | **Atomic Voice Base**（ES8311 + NS4150B。旧名 Atomic Echo Base） | 4M / 2M（dict 6.2 MB） | ✅ 2026-09-10（文字 UI で確認。顔はビルドのみ。音は人が聴いて確認すること） |
 | **ATOMS3R** | S3 / 8 MB **Octal** / 8 MB | 同上 | 本体ボタン | 同上 | 4M / 2M | ⚠️ ビルドのみ |
+| **Core Basic**（V2.6 以降） | **ESP32** / **無し** / 16 MB | 顔（avatar）か text | ボタン A | 内蔵 DAC (GPIO25) + アンプ | 4M / 2M（dict 3 MB） | ⚠️ ビルドのみ。**arena 176 KB の置き場が無い見込み**（下） |
 | **Core2** | **ESP32** / 8 MB / 16 MB | 顔（avatar）か text | タッチ | 内蔵 NS4168 | 4M / 2M（dict 3 MB。4M は mmap の窓に入らないかもしれない） | ⚠️ ビルドのみ |
 | **Stamp-C5** | **ESP32-C5**（RISC-V）/ 無し / 4 MB | 無し | 無し（シリアル入力のみ） | **外付け I2S DAC**（BCLK G5 / WS G6 / DOUT G7。`-DSAAN_I2S_GPIO_*` で変更） | 2M（dict 2.4 MB） | ⚠️ ビルドのみ |
 
@@ -85,6 +86,7 @@ scripts/get_dict.sh all                                   # 辞書 4 種を mode
 ./idf_board.sh atoms3  -DSAAN_DICT=44000 build            # 辞書を替える
 ./idf_board.sh atoms3r -p /dev/ttyACM0 flash monitor      # ATOMS3R
 ./idf_board.sh core2   -p /dev/ttyUSB0 flash monitor      # Core2（UART コンソール）
+./idf_board.sh basic   -p /dev/ttyUSB0 flash monitor      # Core Basic（同上）
 ./idf_board.sh stampc5 -p /dev/ttyACM0 flash monitor      # Stamp-C5（外付け I2S DAC）
 scripts/make_images.sh                                    # 全ボード × 入る辞書の一括イメージ → firmware/<日付>_images/
 ```
@@ -93,6 +95,9 @@ scripts/make_images.sh                                    # 全ボード × 入�
   `external_speaker.atomic_echo` で有効にする（I2S G8/G6/G5、ES8311 は I2C G38/G39）。M5Unified は Base の
   有無を probe しないので、**Base を外すと無音のまま正常終了する**。PSRAM 無しの ATOMS3 では音声バッファ
   28 KB と Open JTalk のヒープが内部 DRAM に落ちる（起動ログの WARN は正常。1 発話後の空き 110 KB）。
+- **Core Basic**: Core2 と同じ ESP32 だが PSRAM が無い。arena 176 KB は .bss に入らず、内部ヒープの連続
+  ブロックも ESP32 では 110 KB 程度なので、**起動時に「arena を確保できない」で止まる見込み**（実機未確認）。
+  コアの arena を分割できるまでは動かない前提で、ビルド設定だけ用意してある。初代 Basic（flash 4 MB）は対象外。
 - **Stamp-C5**: 画面・スピーカー・ボタンが無いので、外付けの I2S DAC/アンプ（MAX98357A など）を G5/G6/G7 に繋ぎ、
   シリアルから文を入れる。RISC-V なので W8A32（checksum `0xe4b645c30835d42d`）。速度は**未測定**。
 - **Core2**: ESP32 には PIE が無いので W8A32（checksum の期待値は `0xe4b645c30835d42d`）。arena 176 KB は

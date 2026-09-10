@@ -76,10 +76,11 @@ elseif(_saan_board_prop STREQUAL "stampc5")
     # 画面もスピーカーも無い。外付け I2S DAC のピンを saan_speaker.cpp が M5.Speaker に渡す
     target_compile_definitions(${COMPONENT_LIB} PRIVATE SAAN_BOARD_STAMPC5=1)
     message(STATUS "sanoTTS: ボード = **Stamp-C5**（外付け I2S DAC: BCLK G5 / WS G6 / DOUT G7。-DSAAN_I2S_GPIO_* で変更）")
-elseif(_saan_board_prop STREQUAL "core2")
-    # ESP32 は静的 DRAM が小さく arena 176 KB が .bss に入らない → 起動時に PSRAM から取る（main.c）
+elseif(_saan_board_prop MATCHES "^(core2|basic)$")
+    # ESP32 は静的 DRAM が小さく arena 176 KB が .bss に入らない → 起動時にヒープから取る（main.c。PSRAM 優先）
+    # ⚠️ basic は PSRAM が無く、内部ヒープの最大連続ブロックは 176 KB に届かない見込み（起動時に止まる）
     target_compile_definitions(${COMPONENT_LIB} PRIVATE SAAN_ARENA_HEAP=1)
-    message(STATUS "sanoTTS: ボード = **Core2**（arena は PSRAM のヒープ）")
+    message(STATUS "sanoTTS: ボード = **${_saan_board_prop}**（arena はヒープ。PSRAM 優先）")
 endif()
 
 foreach(_pin BCLK WS DOUT)
