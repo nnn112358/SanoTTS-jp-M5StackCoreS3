@@ -80,7 +80,7 @@ M5Stack CoreS3 / ESP-IDF v5.5.5 / -O2 / 240 MHz / PSRAM ON / 22.05 kHz 直接再
   **114〜115 フレーム/発話**（33 ms 版は 34〜35）、口が開いたのは 77〜78 フレーム、最大 1.00。
   定常 xRT は 0.433〜0.446 で変わらず（core 1 の仕事が 3 倍になっても合成に影響しない）、
   checksum も `0xa69a7ebbb5ccb05f` のまま
-- 焼いたバイナリは [`firmware/2026-09-07_avatar_newcore/`](../firmware/README.md) に保存（一括 16 MB イメージつき）
+- 焼いたバイナリは `firmware/2026-09-07_avatar_newcore/` に保存していたが 2026-09-12 に消した（git の履歴 `0f946a5` 以前にある）
 
 ### ビルド（2026-09-04、`./idf.sh build`、クリーンビルド、`-DSAAN_KANJI=1` 既定）
 

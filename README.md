@@ -56,7 +56,7 @@ CoreS3 以外は `./idf_board.sh <ボード> …`（[対応ボード](#対応ボ
 | `-DSAAN_OJ_PSRAM=0/1` | **1** | Open JTalk の一時ヒープを PSRAM に向ける（0 は陽性対照。内部 DRAM が減るのを見る）。PSRAM の無い ATOMS3 / Stamp-C5 では内部 DRAM に落ちる |
 | `-DSAAN_PROFILE=0/1` | **0** | 段別プロファイル（CCOUNT）を発話後に出す。**速度の報告には 0 で**（計測にコストがある） |
 
-ビルド環境なしで焼くだけなら、ボード × 辞書の一括イメージと app が [`firmware/`](firmware/README.md) にある
+ビルド環境なしで焼くだけなら、ボード × 辞書の app と部品が [`firmware/`](firmware/README.md) にある
 （`esptool.py write_flash 0x0 …` で焼く。辞書込みの一括イメージは大きいので git には入れず、
 `scripts/make_images.sh` で作る）。
 
@@ -162,8 +162,6 @@ Core Basic）は**ボードが外れていたので実機未確認**。ホスト
 
 未解決:
 
-- **CoreS3 でノイズが乗る**（2026-09-10 に聴取）。給餌方式・顔の有無・辞書のどれを変えても変わらず、原因は
-  絞れていない。次の切り分けは `firmware/2026-09-07_avatar_newcore/` の確認済みイメージを焼いて当時と同じ音か聴くこと
 - **ESP32 / ESP32-C5 の速度**は未測定。W8A32 は実時間を超える可能性が高く、ストリーミングでは途切れる前提
   （`-DSAAN_BUFFERED=1` を勧める）。`-DSAAN_W8A8_NOPIE=1`（PIE 無しの W8A8）のほうが速いかも測っていない
 - **Core2 / Basic の 4M 辞書**は、M5 込みビルドの .rodata（フォント 2 サイズで約 400 KB）のぶん ESP32 の
