@@ -3,7 +3,7 @@
 日本語 TTS **[sanoTTS-jp](https://github.com/ayutaz/sanoTTS-jp)**（559 K params の蒸留モデル、
 [arXiv:2608.21378](https://arxiv.org/abs/2608.21378) の日本語版）を **M5Stack 単体**で動かす
 ESP-IDF プロジェクト。クラウド不要。**CoreS3**（既定）のほか **Core2 / Core Basic / ATOMS3 / ATOMS3R / Stamp-C5** で
-ビルドできる（[対応ボード](#対応ボード)。実機で確かめたのは CoreS3 と ATOMS3）。
+ビルドできる（[対応ボード](#対応ボード)。実機で確かめたのは CoreS3 と ATOMS3。残りはビルドと QEMU まで。[既知の課題](#既知の課題)）。
 
 - 起動すると `今日は良い天気ですね。` を喋る。画面のあるボードでは [m5stack-avatar](https://github.com/stack-chan/m5stack-avatar)
   の顔が出て、吹き出しに文を出しながら**口が音量に合わせて動く**（ATOMS3 / ATOMS3R は 128 x 128 に縮小）。
@@ -143,6 +143,46 @@ W8A32 `0xe4b645c30835d42d`。旧コアの `0x04de91103a0e49f9` とは一致し�
 同期前（旧コア、2026-09-02 実測）: W8A8+PIE 定常 1.55× RT で再生に追いつかず、音声の
 (1 − 1/xRT) + 2 チャンク ≒ 60% を先に貯めてから鳴らし始めていた（1.2 秒の文で発話開始まで 1.8 s、
 途切れ 0）。出力 PCM は sanoTTS-jp の QEMU 記録と 27,136 sample すべて bit 一致（移植は正しい）。
+
+2026-09-10 の後半以降（顔 ⇄ 文字の実行時切り替え、コアの複数ブロック arena、Stamp-C5 の M5 無し構成、
+Core Basic）は**ボードが外れていたので実機未確認**。ホストテストと QEMU（ESP32）では通っている。
+
+## 既知の課題
+
+実機で未確認のもの（2026-09-12 時点）:
+
+- **顔 ⇄ 文字の実行時切り替え**（長押し / ボタン B / `/ui`）はどのボードでも一度も動かしていない。
+  「もう一度」の操作が「押した瞬間」から「短く押して離した瞬間」に変わった点も含めて確認が要る
+- **ATOMS3 の縮小した顔**（scale 0.4）と、PSRAM 無しでの avatar のメモリ
+- **コアの複数ブロック arena** はホスト / QEMU で bit 一致だが、S3 実機で checksum `0xa69a7ebbb5ccb05f` が
+  変わらないことは焼いて確かめるべき
+- **ATOMS3R / Core2 / Core Basic / Stamp-C5** は 1 度も実機で動いていない。ATOMS3R の Octal PSRAM 設定、
+  Stamp-C5 の I2S ピン、Basic の M5 込みメモリ（QEMU の M5 無し構成で空き 70 KB。M5GFX・avatar・M5.Speaker の
+  タスクとバッファで数十 KB 減る）はすべて推定
+
+未解決:
+
+- **CoreS3 でノイズが乗る**（2026-09-10 に聴取）。給餌方式・顔の有無・辞書のどれを変えても変わらず、原因は
+  絞れていない。次の切り分けは `firmware/2026-09-07_avatar_newcore/` の確認済みイメージを焼いて当時と同じ音か聴くこと
+- **ESP32 / ESP32-C5 の速度**は未測定。W8A32 は実時間を超える可能性が高く、ストリーミングでは途切れる前提
+  （`-DSAAN_BUFFERED=1` を勧める）。`-DSAAN_W8A8_NOPIE=1`（PIE 無しの W8A8）のほうが速いかも測っていない
+- **Core2 / Basic の 4M 辞書**は、M5 込みビルドの .rodata（フォント 2 サイズで約 400 KB）のぶん ESP32 の
+  4 MB mmap 窓に入らない見込み。文字画面のフォントを 1 サイズにすれば入る余地がある
+
+設計上の負債:
+
+- `components/saanotts_core/saanotts.{h,c}` と `main/saan_kanji.c` は本家の「そのままのコピー」ではなくなった
+  （arena の複数ブロック対応）。次に本家へ同期するとき当て直しが要る。本家に PR を出すのが本筋
+- ESP32 / C5 のビルドのたびに `dependencies.lock` の target が書き換わる（スクリプトは `git checkout` で戻している）
+- `firmware/` に app バイナリをコミットしているのでリポジトリが 1 コミットあたり約 10 MB 増える。Release に移すか
+  最新だけ残す運用を決めたい
+- ホストテスト（`scripts/host/arena_regions_test.c`）と QEMU（`scripts/qemu_basic.sh`）は CI に繋がっていない
+
+小さいこと:
+
+- 起動ログの「漢字経路の作業領域 … / Viterbi に渡る …」は 1 ブロック前提の計算で、複数ブロックでは実際と違う
+- Stamp-C5 の factory パーティションは残り 13%
+- `SAAN_ARENA_HIST`（同時に生きている確保の上限）は 128 件固定。いまは約 30
 
 詳細:
 - [`docs/measurements.md`](docs/measurements.md) — 速度・正しさ・メモリの実測値
